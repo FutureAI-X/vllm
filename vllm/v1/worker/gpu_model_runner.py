@@ -1412,6 +1412,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                   is_profile: bool = False) -> None:
         """
         Step for the EPLB (Expert Parallelism Load Balancing) state.
+        更新专家并行的负载均衡状态，以确保在后续的推理过程中各专家的负载保持相对均衡
         """
         if not self.parallel_config.enable_eplb:
             return

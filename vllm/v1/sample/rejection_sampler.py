@@ -24,12 +24,20 @@ class RejectionSampler(nn.Module):
     """
     The implementation strictly follows the algorithm described in
         https://arxiv.org/abs/2211.17192.
+    实现严格遵循上述论文中描述的算法
+
     However, we want to clarify the terminology used in the implementation:
+    但是，我们需要澄清实现中使用的术语：
+
     accepted tokens: tokens that are accepted based on the relationship
             between the "raw" draft and target probabilities.
+            接受的 tokens: 基于草稿模型和目标模型之间概率的关系，被接受的令牌
+
     recovered tokens: tokens that are sampled based on the adjusted probability
         distribution, which is derived from both the draft and target
         probabilities.
+        恢复的 tokens: 基于调整后的概率分布进行采样的令牌，该分布由草稿模型和目标模型的概率共同推导得出
+
     bonus tokens:
         If all proposed tokens are accepted, the bonus token is added to the
         end of the sequence. The bonus token is only sampled from the target
@@ -38,9 +46,14 @@ class RejectionSampler(nn.Module):
         sampling process. For example, we can use top_p, top_k sampling for
         bonus tokens, while spec decode does not support these sampling
         strategies.
+        奖励的 tokens: 如果所有提议的令牌都被接受，则在序列末尾添加一个奖励令牌。奖励令牌仅从目标模型的概率中进行采样。
+        我们选择将奖励令牌作为输入传入，而不是在拒绝采样器中进行采样，以在采样过程中提供更大的灵活性。
+        例如，我们可以对奖励令牌使用 top_p、top_k 采样等方法，而推测解码（spec decode）本身并不支持这些采样策略。
+
     output tokens:
         Tokens are finally generated with the rejection sampler.
         output tokens = accepted tokens + recovered tokens + bonus tokens
+        输出的 tokens
     """
 
     def forward(
@@ -58,16 +71,24 @@ class RejectionSampler(nn.Module):
         Args:
             metadata:
                 Metadata for spec decoding.
+                用于投机解码的元数据
+
             draft_probs (Optional[torch.Tensor]):
                 Probability distribution for the draft tokens. Shape is
                 [num_tokens, vocab_size]. Can be None if probabilities are
                 not provided, which is the case for ngram spec decode.
+                draft tokens的概率分布。形状为[num_tokens, vocab_size]。
+                如果未提供概率, 则表示为n-gram的解码, 可以为None。
+
             target_logits (torch.Tensor):
                 Target model's logits probability distribution.
                 Shape is [num_tokens, vocab_size]. Here, probabilities from
                 different requests are flattened into a single tensor because
                 this is the shape of the output logits.
                 NOTE: `target_logits` can be updated in place to save memory.
+                目标模型的 logits 概率分布。形状为 [num_tokens, vocab_size]。
+                此处，来自不同请求的概率被展平为单个张量，因为这是输出 logits 的形状。
+
             bonus_token_ids_tensor (torch.Tensor):
                 A tensor containing bonus tokens. Shape is [batch_size, 1].
                 Bonus tokens are added to the end of the sequence if all
@@ -75,23 +96,30 @@ class RejectionSampler(nn.Module):
                 outside of the rejection sampler with the default sampling
                 strategy. It allows for more flexibility in the sampling
                 process such as top_p, top_k sampling.
+                包含奖励令牌的张量。形状为 [batch_size, 1]。如果所有提议的令牌都被接受，则将奖励令牌添加到序列末尾。
+                我们在拒绝采样器之外使用默认的采样策略生成奖励令牌。这使得采样过程更具灵活性，例如支持 top_p、top_k 采样等。
+                
             sampling_metadata (vllm.v1.sample.metadata.SamplingMetadata):
                 Additional metadata needed for sampling, such as temperature,
                 top-k/top-p parameters, or other relevant information.
+                采样所需的附加元数据，例如温度、top-k/top-p 参数或其他相关信息。
+
         Returns:
             output_token_ids (torch.Tensor):
                 A tensor containing the final output token IDs.
         '''
+        # 检查场序是否小于等于最大允许的推测长度，确保不会超出预设限制
         assert metadata.max_spec_len <= MAX_SPEC_LEN
         # [num_tokens, vocab_size]
         # NOTE(woosuk): `target_logits` can be updated in place inside the
         # `compute_probs` function.
+        # 将 logits 转换为概率
         target_probs = compute_probs(
             target_logits,
             metadata.cu_num_draft_tokens,
             sampling_metadata,
         )
-
+        # 执行拒绝采样
         output_token_ids = rejection_sample(
             metadata.draft_token_ids,
             metadata.num_draft_tokens,
@@ -102,6 +130,7 @@ class RejectionSampler(nn.Module):
             bonus_token_ids,
             sampling_metadata,
         )
+        # 返回采样得到的 token
         return output_token_ids
 
     @staticmethod
@@ -148,14 +177,19 @@ def rejection_sample(
     bonus_token_ids: torch.Tensor,
     sampling_metadata: SamplingMetadata,
 ) -> torch.Tensor:
+    # 参数校验与处理
     assert draft_token_ids.ndim == 1
     assert draft_probs is None or draft_probs.ndim == 2
     assert cu_num_draft_tokens.ndim == 1
     assert target_probs.ndim == 2
 
+    # 批次大小/序列个数
     batch_size = len(num_draft_tokens)
+    # 总的 draft token 数
     num_tokens = draft_token_ids.shape[0]
+    # 词表大小
     vocab_size = target_probs.shape[-1]
+    # 设备
     device = target_probs.device
     assert draft_token_ids.is_contiguous()
     assert draft_probs is None or draft_probs.is_contiguous()
@@ -178,6 +212,12 @@ def rejection_sample(
     if not sampling_metadata.all_random:
         # Rejection sampling for greedy sampling requests.
         target_argmax = target_probs.argmax(dim=-1)
+        """
+        此处是调用 triton 内核的写法
+        - [(batch_size, )] 指定了内核的网格大小（grid size）
+        - (batch_size, ) 是一个元组，表示启动 batch_size 个并行块（block）
+        - 每个块会处理一个请求（request）
+        """
         rejection_greedy_sample_kernel[(batch_size, )](
             output_token_ids,
             cu_num_draft_tokens,
