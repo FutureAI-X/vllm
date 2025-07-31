@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import dataclasses
 import gc
 import time
 from contextlib import contextmanager
@@ -47,6 +48,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
 from vllm.v1.attention.backends.mamba_selectors import get_mamba_attn_backend
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder, CommonAttentionMetadata,
+    make_kv_sharing_fast_prefill_attention_metadata,
     make_local_attention_virtual_batches)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec,
@@ -153,6 +155,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.max_num_encoder_input_tokens = encoder_compute_budget
         self.encoder_cache_size = encoder_cache_size
 
+        # Sampler
         # Sampler 采样器初始化，采样器负责根据模型输出的logits生成下一个token，支持不同的采样策略（如贪婪搜索、随机采样等）。logprobs_mode参数控制是否需要返回log概率信息
         self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
 
@@ -320,6 +323,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # means this layer will perform attention using the keys and values
         # from the KV cache of `shared_kv_cache_layers[layer_name]`.
         self.shared_kv_cache_layers: dict[str, str] = {}
+        self.kv_sharing_fast_prefill_eligible_layers: set[str] = set()
+
+        self.kv_sharing_fast_prefill_logits_indices = None
+        if self.cache_config.kv_sharing_fast_prefill:
+            self.kv_sharing_fast_prefill_logits_indices = torch.zeros(
+                self.max_num_tokens, dtype=torch.int32, device=self.device)
 
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """
@@ -743,6 +752,58 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         spec_decode_common_attn_metadata = None
 
+        # StepN 投机解码相关元数据准备
+        # 判断是否需要进行推测解码
+        use_spec_decode = len(
+            scheduler_output.scheduled_spec_decode_tokens) > 0
+        if not use_spec_decode:
+            # NOTE(woosuk): Due to chunked prefills, the batch may contain
+            # partial requests. While we should not sample any token
+            # from these partial requests, we do so for simplicity.
+            # We will ignore the sampled tokens from the partial requests.
+            # TODO: Support prompt logprobs.
+            logits_indices = query_start_loc[1:] - 1
+            spec_decode_metadata = None
+        else:
+            # Get the number of draft tokens for each request.
+            # Iterate over the dictionary rather than all requests since not all
+            # requests have draft tokens.
+            # 获取每个请求的草稿令牌数量
+            num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
+            for req_id, draft_token_ids in (
+                    scheduler_output.scheduled_spec_decode_tokens.items()):
+                req_idx = self.input_batch.req_id_to_index[req_id]
+                num_draft_tokens[req_idx] = len(draft_token_ids)
+            # 组装投机解码元数据
+            spec_decode_metadata = self._calc_spec_decode_metadata(
+                num_draft_tokens, cu_num_tokens)
+            logits_indices = spec_decode_metadata.logits_indices
+
+        logits_indices_padded = None
+        if self.cache_config.kv_sharing_fast_prefill:
+            assert self.kv_sharing_fast_prefill_logits_indices is not None
+            num_logits = logits_indices.shape[0]
+            assert num_logits > 0
+            self.kv_sharing_fast_prefill_logits_indices[:num_logits].copy_(
+                logits_indices)
+            # There might have leftover indices in logits_indices[num_logits:]
+            # from previous iterations, whose values may be greater than the
+            # batch size in the current iteration. To ensure indices are always
+            # valid, we fill the padded indices with the last index.
+            self.kv_sharing_fast_prefill_logits_indices[num_logits:].fill_(
+                logits_indices[-1].item())
+            if (self.use_cuda_graph
+                    and num_logits <= self.cudagraph_batch_sizes[-1]):
+                # Use piecewise CUDA graphs.
+                # Add padding to the batch size.
+                num_logits_padded = self.vllm_config.pad_for_cudagraph(
+                    num_logits)
+            else:
+                num_logits_padded = num_logits
+            logits_indices_padded = (
+                self.kv_sharing_fast_prefill_logits_indices[:num_logits_padded]
+            )
+
         attn_metadata: dict[str, Any] = {}
 
         # Prepare encoder attention metadata separately
@@ -814,7 +875,28 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 common_attn_metadata=common_attn_metadata,
             ))
 
+            fast_prefill_metadata = attn_metadata_i
+            if (self.cache_config.kv_sharing_fast_prefill
+                    and self.kv_sharing_fast_prefill_eligible_layers):
+                # Dynamically create a a dataclass type that inherits
+                # from attention metadata type but includes additional
+                # fields logits_indices_padded and num_logits_indices
+                # which are required for prefill truncation
+                fast_prefill_metadata_type = (
+                    make_kv_sharing_fast_prefill_attention_metadata(
+                        metadata_cls=type(attn_metadata_i), ))
+                fast_prefill_metadata = fast_prefill_metadata_type(
+                    **dataclasses.asdict(attn_metadata_i),
+                    logits_indices_padded=logits_indices_padded,
+                    num_logits_indices=logits_indices.size(0),
+                )
+
             for layer_name in kv_cache_group_spec.layer_names:
+                if (self.cache_config.kv_sharing_fast_prefill and layer_name
+                        in self.kv_sharing_fast_prefill_eligible_layers):
+                    attn_metadata[layer_name] = fast_prefill_metadata
+                    continue
+
                 attn_metadata[layer_name] = attn_metadata_i
 
             # Hack for now to fix chunked local attention + no hybrid kv cache
@@ -845,34 +927,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         attention_cuda_graphs = all(
             b.can_run_in_cudagraph(common_attn_metadata)
             for b in self.attn_metadata_builders)
-
-        # StepN 投机解码相关元数据准备
-        # 判断是否需要进行推测解码
-        use_spec_decode = len(
-            scheduler_output.scheduled_spec_decode_tokens) > 0
-        if not use_spec_decode:
-            # NOTE(woosuk): Due to chunked prefills, the batch may contain
-            # partial requests. While we should not sample any token
-            # from these partial requests, we do so for simplicity.
-            # We will ignore the sampled tokens from the partial requests.
-            # TODO: Support prompt logprobs.
-            logits_indices = query_start_loc[1:] - 1
-            spec_decode_metadata = None
-        else:
-            # Get the number of draft tokens for each request.
-            # Iterate over the dictionary rather than all requests since not all
-            # requests have draft tokens.
-            # 获取每个请求的草稿令牌数量
-            num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
-            for req_id, draft_token_ids in (
-                    scheduler_output.scheduled_spec_decode_tokens.items()):
-                req_idx = self.input_batch.req_id_to_index[req_id]
-                num_draft_tokens[req_idx] = len(draft_token_ids)
-
-            # 组装投机解码元数据
-            spec_decode_metadata = self._calc_spec_decode_metadata(
-                num_draft_tokens, cu_num_tokens)
-            logits_indices = spec_decode_metadata.logits_indices
 
         # Hot-Swap lora model
         if self.lora_config:
@@ -1035,7 +1089,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         """
         计算投机解码所需的元数据
             num_draft_tokens: 每个序列中 draft token 的数量
-            cu_num_scheduled_tokens: 每个序列 toekn 个数的累积和 [2, 5, 3] -> [2, 7, 10]
+            cu_num_scheduled_tokens: 每个序列 scheduled toekn 个数的累积和 [2, 5, 3] -> [2, 7, 10]
 
         概念解释:
             bonus token: 当所有草稿的 tokens 都被接受时，额外生成一个 token
@@ -1058,15 +1112,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Step 1. 构建 logits_indices (所有需要计算 logits 的位置)
         # cu_num_sampled_tokens: [4, 5, 8, 9, 11]       累积和
         # arange: [0, 1, 2, 3, 0, 0, 1, 2, 0, 0, 1]     每个序列内的相对位置
+        # Step 1. cu_num_sampled_tokens: [4, 5, 8, 9, 11]
+        # arange: [0, 1, 2, 3, 0, 0, 1, 2, 0, 0, 1]
         cu_num_sampled_tokens, arange = self._get_cumsum_and_arange(
             num_sampled_tokens, cumsum_dtype=np.int32)
+        # Step 2. [0, 0, 0, 0, 103, 104, 104, 104, 206, 207, 207]
         # Step 2. [0, 0, 0, 0, 103, 104, 104, 104, 206, 207, 207]   每个序列起始位置重复相应次数
         logits_indices = np.repeat(
             cu_num_scheduled_tokens - num_sampled_tokens, num_sampled_tokens)
+        # Step 3. [0, 1, 2, 3, 103, 104, 105, 106, 206, 207, 208]
         # Step 3. [0, 1, 2, 3, 103, 104, 105, 106, 206, 207, 208]   加上相对位置得到最终索引
         logits_indices += arange
 
-        # Compute the bonus logits indices. 每个序列最后一个采样的 token 位置，用于生成 bonus token
+        # Compute the bonus logits indices.
+        # 每个序列最后一个采样的 token 位置，用于生成 bonus token
         bonus_logits_indices = cu_num_sampled_tokens - 1
 
         # Compute the draft logits indices.
@@ -1080,7 +1139,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # [0, 1, 2, 5, 6, 9]
         target_logits_indices += arange
 
-        # TODO: Optimize the CPU -> GPU copy. 转换为 PyTorch Tensor 并移到 GPU
+        # TODO: Optimize the CPU -> GPU copy.
         cu_num_draft_tokens = torch.from_numpy(cu_num_draft_tokens).to(
             self.device, non_blocking=True)
         logits_indices = torch.from_numpy(logits_indices).to(self.device,
@@ -1441,35 +1500,22 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, IntermediateTensors]:
-        """执行模型推理过程
-        
-        Args:
-            scheduler_output (SchedulerOutput): 调度器输出
-            intermediate_tensors (Optional[IntermediateTensors]): 中间张量（前一 step 输出？）
-        Returns:
-            Union[ModelRunnerOutput, IntermediateTensors]: 模型运行结果 or 中间张量
-        """
-        # 更新 ModelRunner 内部状态
         self._update_states(scheduler_output)
-        # 如果没有计划执行的 token，需要提前返回
         if not scheduler_output.total_num_scheduled_tokens:
-            # 如果没有 KV 传输组返回空的 ModelRunnerOutput
             if not has_kv_transfer_group():
                 # Return empty ModelRunnerOutput if there's no work to do.
                 return EMPTY_MODEL_RUNNER_OUTPUT
-            # 执行 KV 连接器的无前向传播操作
+
             return self.kv_connector_no_forward(scheduler_output,
                                                 self.vllm_config)
 
-        # Prepare the decoder inputs. 准备 decoder 输入
+        # Prepare the decoder inputs.
         (attn_metadata, attention_cuda_graphs, logits_indices,
          spec_decode_metadata, num_scheduled_tokens_np,
          spec_decode_common_attn_metadata) = (
              self._prepare_inputs(scheduler_output))
-        
-        # 计算实际输入 token 数量
+
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        # 根据是否使用 CUDA graph，选择不同的输入计算方式
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
             # Use piecewise CUDA graphs.
@@ -1487,11 +1533,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else:
                 num_input_tokens = num_scheduled_tokens
 
-        # Padding for DP 为数据并行添加 padding
+        # Padding for DP
         num_pad, num_tokens_across_dp = self.get_dp_padding(num_input_tokens)
         num_input_tokens += num_pad
 
-        # 多模态相关处理
         # _prepare_inputs may reorder the batch, so we must gather multi
         # modal outputs after that to ensure the correct order
         if self.is_multimodal_model:
@@ -1531,7 +1576,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         else:
             positions = self.positions[:num_input_tokens]
 
-        # 流水线并行处理
         if get_pp_group().is_first_rank:
             intermediate_tensors = None
         else:
@@ -1543,7 +1587,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # compiled with full CUDA graphs, we have to skip them entirely.
         skip_cuda_graphs = self.full_cuda_graph and not attention_cuda_graphs
 
-        # Run the model. 模型执行: 执行实际的模型前向传播，并处理 KV 缓存传输
+        # Run the model.
         # Use persistent buffers for CUDA graphs.
         with set_forward_context(
                 attn_metadata,
@@ -1569,14 +1613,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             finished_sending, finished_recving = (
                 self.get_finished_kv_transfers(scheduler_output))
 
-        # 处理模型输出，支持辅助隐藏状态输出（如 EAGLE3）
         if self.use_aux_hidden_state_outputs:
             hidden_states, aux_hidden_states = model_output
         else:
             hidden_states = model_output
             aux_hidden_states = None
 
-        # 处理流水线并行的输出传递，最后一个阶段计算 logits
         # Broadcast PP output for external_launcher (torchrun)
         # to make sure we are synced across pp ranks
         # TODO: Support overlapping mirco-batches
@@ -1616,43 +1658,30 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if scheduler_output.grammar_bitmask is not None:
             self.apply_grammar_bitmask(scheduler_output, logits)
 
-        # Step N: 采样
         # Sample the next token and get logprobs if needed.
-        # N.1 获取采样元数据
         sampling_metadata = self.input_batch.sampling_metadata
-        # N.2 无推测解码采样
         if spec_decode_metadata is None:
             sampler_output = self.sampler(
                 logits=logits,
                 sampling_metadata=sampling_metadata,
             )
-        # N.3 推测解码采样
         else:
             # When indexing with a tensor (bonus_logits_indices), PyTorch
             # creates a new tensor with separate storage from the original
             # logits tensor. This means any in-place operations on bonus_logits
             # won't affect the original logits tensor.
-            # Tips: 当对张量 bonus_logits_indices 进行索引操作时，PyTorch 会创建一个与原始 logits 张量分离的新张量
-            # 这意味着对 bonus_logits 的 in-place 操作不会影响到原始 logits 张量。
-            
-            # 确保 logits 不为 None
             assert logits is not None
-            # 从完整的 logits 中根据 spec_decode_metadata.bonus_logits_indices 索引提取出用于生成 bonus_logits 的 logits
             bonus_logits = logits[spec_decode_metadata.bonus_logits_indices]
-            # 对 bonus_logits 进行采样
             sampler_output = self.sampler(
                 logits=bonus_logits,
                 sampling_metadata=sampling_metadata,
             )
-            # 此采样器的输出提取出实际采样得到的 bonus_token_ids
             bonus_token_ids = sampler_output.sampled_token_ids
 
             # Just like `bonus_logits`, `target_logits` is a new tensor with
             # separate storage from the original `logits` tensor. Therefore,
             # it is safe to update `target_logits` in place.
-            # 从完整 logits 中提取用于目标模型验证的 logits，这些是 draft tokens 对应位置的 logits
             target_logits = logits[spec_decode_metadata.target_logits_indices]
-            # 使用拒绝采样器执行推测解码的验证步骤
             output_token_ids = self.rejection_sampler(
                 spec_decode_metadata,
                 None,  # draft_probs
@@ -1666,7 +1695,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             num_nans_in_logits = self._get_nans_in_logits(logits)
 
-        # Step Final: 后处理和结果返回
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
         discard_sampled_tokens_req_indices = []
@@ -1691,13 +1719,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         logprobs_lists = logprobs_tensors.tolists() \
             if logprobs_tensors is not None else None
 
-        # Compute prompt logprobs if needed. 如果需要的化，计算 prompt 的 logprob
+        # Compute prompt logprobs if needed.
         prompt_logprobs_dict = self._get_prompt_logprobs_dict(
             hidden_states[:num_scheduled_tokens],
             scheduler_output,
         )
 
-        # Get the valid generated tokens. 获取有效的生成 token 并清理不应采样的 token
+        # Get the valid generated tokens.
         sampled_token_ids = sampler_output.sampled_token_ids
         max_gen_len = sampled_token_ids.shape[-1]
         if max_gen_len == 1:
@@ -1713,7 +1741,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         for i in discard_sampled_tokens_req_indices:
             valid_sampled_token_ids[i].clear()
 
-        # 缓存采样的 token 以便调度其使用
         # Cache the sampled tokens in the model runner, so that the scheduler
         # doesn't need to send them back.
         # NOTE(woosuk): As an exception, when using PP, the scheduler sends
@@ -1738,7 +1765,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_state = self.requests[req_id]
             req_state.output_token_ids.extend(sampled_ids)
 
-        # 如果启用推测解码，则生成草稿 token
         if not self.speculative_config:
             # Speculative decoding is not enabled.
             spec_token_ids = None
@@ -1755,10 +1781,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 spec_decode_common_attn_metadata,
             )
 
-        # 执行专家并行负载均衡
         self.eplb_step()
 
-        # 返回最终结果
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
@@ -2872,6 +2896,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 kv_cache_config.kv_cache_groups,
                 kv_caches,
             )
+            attn_layers = get_layers_from_vllm_config(self.vllm_config,
+                                                      Attention)
+            # Iterate in reversed order and add layers that re-use KV cache
+            # e.g. in YOCO-like KV sharing setups (e.g. Gemma3n)
+            for layer_name in reversed(attn_layers):
+                if layer_name in self.shared_kv_cache_layers:
+                    self.kv_sharing_fast_prefill_eligible_layers.add(
+                        layer_name)
+                else:
+                    break
 
         bind_kv_cache(kv_caches,
                       self.compilation_config.static_forward_context,
