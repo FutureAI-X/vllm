@@ -152,6 +152,106 @@ class LLM:
         serving, use the [AsyncLLMEngine][vllm.AsyncLLMEngine] class instead.
     """
 
+    """
+    Args:
+        --- 核心模型参数
+        model: The name or path of a HuggingFace Transformers model.
+        tokenizer: The name or path of a HuggingFace Transformers tokenizer.
+        tokenizer_mode: The tokenizer mode. "auto" will use the fast tokenizer
+            if available, and "slow" will always use the slow tokenizer.
+        skip_tokenizer_init: If true, skip initialization of tokenizer and
+            detokenizer. Expect valid prompt_token_ids and None for prompt
+            from the input.
+            如果为 true, 则跳过 tokenizer 和 detokenizer 的初始化
+            当输入已提供了 prompt_token_ids 且 prompt 为 None 时
+        trust_remote_code: Trust remote code (e.g., from HuggingFace) when
+            downloading the model and tokenizer.
+            下载 model 和 tokenizer 时，是否信任远程代码（如来自 HuggingFace）
+        allowed_local_media_path: Allowing API requests to read local images
+            or videos from directories specified by the server file system.
+            This is a security risk. Should only be enabled in trusted
+            environments.
+            允许API请求从服务器文件系统制定的目录读取本地图像或视频餐
+            这是一个安全风险, 应该仅在受信任的环境中启用。
+        
+        --- 分布式和硬件配置
+        tensor_parallel_size: The number of GPUs to use for distributed
+            execution with tensor parallelism.
+            用于张量并行的分布式执行的 GPU 数量
+        dtype: The data type for the model weights and activations. Currently,
+            we support `float32`, `float16`, and `bfloat16`. If `auto`, we use
+            the `torch_dtype` attribute specified in the model config file.
+            However, if the `torch_dtype` in the config is `float32`, we will
+            use `float16` instead.
+            模型权重和激活值的数据类型
+        quantization: The method used to quantize the model weights. Currently,
+            we support "awq", "gptq", and "fp8" (experimental).
+            If None, we first check the `quantization_config` attribute in the
+            model config file. If that is None, we assume the model weights are
+            not quantized and use `dtype` to determine the data type of
+            the weights.
+            模型权重的量化方法
+        revision: The specific model version to use. It can be a branch name,
+            a tag name, or a commit id.
+            要使用的特定模型版本. 它可以是 branch name, tag name or commit id
+        tokenizer_revision: The specific tokenizer version to use. It can be a
+            branch name, a tag name, or a commit id.
+            要使用的特定分词器版本. 它可以是 branch name, tag name or commit id
+        seed: The seed to initialize the random number generator for sampling.
+            用于初始化采样随机数生成器的种子
+
+        --- 内存管理参数
+        gpu_memory_utilization: The ratio (between 0 and 1) of GPU memory to
+            reserve for the model weights, activations, and KV cache. Higher
+            values will increase the KV cache size and thus improve the model's
+            throughput. However, if the value is too high, it may cause out-of-
+            memory (OOM) errors.
+        swap_space: The size (GiB) of CPU memory per GPU to use as swap space.
+            This can be used for temporarily storing the states of the requests
+            when their `best_of` sampling parameters are larger than 1. If all
+            requests will have `best_of=1`, you can safely set this to 0.
+            Noting that `best_of` is only supported in V0. Otherwise, too small
+            values may cause out-of-memory (OOM) errors.
+        cpu_offload_gb: The size (GiB) of CPU memory to use for offloading
+            the model weights. This virtually increases the GPU memory space
+            you can use to hold the model weights, at the cost of CPU-GPU data
+            transfer for every forward pass.
+        enforce_eager: Whether to enforce eager execution. If True, we will
+            disable CUDA graph and always execute the model in eager mode.
+            If False, we will use CUDA graph and eager execution in hybrid.
+        max_seq_len_to_capture: Maximum sequence len covered by CUDA graphs.
+            When a sequence has context length larger than this, we fall back
+            to eager mode. Additionally for encoder-decoder models, if the
+            sequence length of the encoder input is larger than this, we fall
+            back to the eager mode.
+        disable_custom_all_reduce: See
+            [ParallelConfig][vllm.config.ParallelConfig].
+        disable_async_output_proc: Disable async output processing.
+            This may result in lower performance.
+        hf_token: The token to use as HTTP bearer authorization for remote files
+            . If `True`, will use the token generated when running
+            `huggingface-cli login` (stored in `~/.huggingface`).
+        hf_overrides: If a dictionary, contains arguments to be forwarded to the
+            HuggingFace config. If a callable, it is called to update the
+            HuggingFace config.
+        mm_processor_kwargs: Arguments to be forwarded to the model's processor
+            for multi-modal data, e.g., image processor. Overrides for the
+            multi-modal processor obtained from `AutoProcessor.from_pretrained`.
+            The available overrides depend on the model that is being run.
+            For example, for Phi-3-Vision: `{"num_crops": 4}`.
+        override_pooler_config: Initialize non-default pooling config or
+            override default pooling config for the pooling model.
+            e.g. `PoolerConfig(pooling_type="mean", normalize=False)`.
+        compilation_config: Either an integer or a dictionary. If it is an
+            integer, it is used as the level of compilation optimization. If it
+            is a dictionary, it can specify the full compilation configuration.
+        **kwargs: Arguments for [`EngineArgs`][vllm.EngineArgs].
+
+    Note:
+        This class is intended to be used for offline inference. For online
+        serving, use the [AsyncLLMEngine][vllm.AsyncLLMEngine] class instead.
+    """
+
     DEPRECATE_LEGACY: ClassVar[bool] = True
     """A flag to toggle whether to deprecate the legacy generate/encode API."""
 
@@ -198,9 +298,12 @@ class LLM:
     ) -> None:
         """LLM constructor."""
 
+        # Step1 参数处理
+        # 1.1 默认禁用日至统计
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
 
+        # 1.2 worker cls 序列化, 如果传入的是类而非字符串, 则使用 cloudpickle 进行序列化
         if "worker_cls" in kwargs:
             worker_cls = kwargs["worker_cls"]
             # if the worker_cls is not qualified string name,
@@ -208,6 +311,7 @@ class LLM:
             if isinstance(worker_cls, type):
                 kwargs["worker_cls"] = cloudpickle.dumps(worker_cls)
 
+        # 1.3 kv_transfer_config 转换, 如果传入了该参数并且是字典，则转换为 KVTransferConfig
         if "kv_transfer_config" in kwargs and isinstance(
                 kwargs["kv_transfer_config"], dict):
             from vllm.config import KVTransferConfig
@@ -241,6 +345,8 @@ class LLM:
         else:
             compilation_config_instance = CompilationConfig()
 
+        # Step2 引擎(Engine)创建
+        # 2.1 构造 EngineArgs
         engine_args = EngineArgs(
             model=model,
             runner=runner,
@@ -273,14 +379,18 @@ class LLM:
 
         log_non_default_args(engine_args)
 
+        # 2.2 创建 Engine
         # Create the Engine (autoselects V0 vs V1)
         self.llm_engine = LLMEngine.from_engine_args(
             engine_args=engine_args, usage_context=UsageContext.LLM_CLASS)
         self.engine_class = type(self.llm_engine)
 
+        # Step3 后续初始化
         self.request_counter = Counter()
+        # 3.2 设置默认采样参数
         self.default_sampling_params: Union[dict[str, Any], None] = None
 
+        # 3.3 获取支持的任务类型
         if envs.VLLM_USE_V1:
             supported_tasks = self.llm_engine \
                 .get_supported_tasks()  # type: ignore
