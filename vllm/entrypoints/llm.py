@@ -206,45 +206,80 @@ class LLM:
             values will increase the KV cache size and thus improve the model's
             throughput. However, if the value is too high, it may cause out-of-
             memory (OOM) errors.
+            为模型权重、激活和 KV 缓存的 GPU 内存使用率。
+            值越高，KV 缓存大小就越大，从而提高模型的吞吐量。
+            但是，如果值过高，可能会导致内存不足（OOM）错误。
+
         swap_space: The size (GiB) of CPU memory per GPU to use as swap space.
             This can be used for temporarily storing the states of the requests
             when their `best_of` sampling parameters are larger than 1. If all
             requests will have `best_of=1`, you can safely set this to 0.
             Noting that `best_of` is only supported in V0. Otherwise, too small
             values may cause out-of-memory (OOM) errors.
+            每个 GPU 用作交换空间的 CPU 内存大小
+
         cpu_offload_gb: The size (GiB) of CPU memory to use for offloading
             the model weights. This virtually increases the GPU memory space
             you can use to hold the model weights, at the cost of CPU-GPU data
             transfer for every forward pass.
+            用于卸载模型权重的 CPU 内存大小, 虚拟增加可用于存储模型权重的 GPU 内存空间
+            每次前向传递都需要 CPU-GPU 数据传输
+
+        --- 执行模式设置
         enforce_eager: Whether to enforce eager execution. If True, we will
             disable CUDA graph and always execute the model in eager mode.
             If False, we will use CUDA graph and eager execution in hybrid.
+            是否强制使用 eager 执行模式
+            True: 禁用 CUDA 图, 强制使用 eager 执行模式
+            False: 使用 CUDA 图和混合执行模式
+
         max_seq_len_to_capture: Maximum sequence len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
             to eager mode. Additionally for encoder-decoder models, if the
             sequence length of the encoder input is larger than this, we fall
             back to the eager mode.
+            CUDA 图覆盖的最大序列长度, 当序列上下文长度超过此值时, 回退到 eager 模式
+
+        --- 高级配置选项
         disable_custom_all_reduce: See
             [ParallelConfig][vllm.config.ParallelConfig].
         disable_async_output_proc: Disable async output processing.
             This may result in lower performance.
+            禁用异步输出处理, 这可能会导致性能下降
+
         hf_token: The token to use as HTTP bearer authorization for remote files
             . If `True`, will use the token generated when running
             `huggingface-cli login` (stored in `~/.huggingface`).
+            用于远程文件的 HTTP 认证令牌
+            True: 使用运行 `huggingface-cli login` 时生成的令牌
+            str: 直接提供令牌字符
+
         hf_overrides: If a dictionary, contains arguments to be forwarded to the
             HuggingFace config. If a callable, it is called to update the
             HuggingFace config.
+            传递给 HuggingFace 配置的参数
+            如果是字典: 包含要转发给 HuggingFace 配置的参数
+            如果是可调用对象: 调用此函数以更新 HuggingFace 配置
+
         mm_processor_kwargs: Arguments to be forwarded to the model's processor
             for multi-modal data, e.g., image processor. Overrides for the
             multi-modal processor obtained from `AutoProcessor.from_pretrained`.
             The available overrides depend on the model that is being run.
             For example, for Phi-3-Vision: `{"num_crops": 4}`.
+            传递给多模态数据处理器的参数
+
         override_pooler_config: Initialize non-default pooling config or
             override default pooling config for the pooling model.
             e.g. `PoolerConfig(pooling_type="mean", normalize=False)`.
+            初始化非默认池化配置或覆盖默认池化配置
+
         compilation_config: Either an integer or a dictionary. If it is an
             integer, it is used as the level of compilation optimization. If it
             is a dictionary, it can specify the full compilation configuration.
+            编译优化配置
+            如果是整数: 用作编译优化级别
+            如果是字典: 可以指定完整的编译配置
+
         **kwargs: Arguments for [`EngineArgs`][vllm.EngineArgs].
 
     Note:

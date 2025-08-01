@@ -112,11 +112,18 @@ def _detect_cloud_provider() -> str:
 
 
 class UsageContext(str, Enum):
+    """定义 vLLM 的使用场景或上下文环境"""
+    # 未知
     UNKNOWN_CONTEXT = "UNKNOWN_CONTEXT"
+    # 使用 .entrypoints.llm:LLM
     LLM_CLASS = "LLM_CLASS"
+    # 作为 API 服务器运行
     API_SERVER = "API_SERVER"
+    # 作为 OpenAI 兼容 API 服务器运行
     OPENAI_API_SERVER = "OPENAI_API_SERVER"
+    # 使用 OpenAI Batch Runner
     OPENAI_BATCH_RUNNER = "OPENAI_BATCH_RUNNER"
+    # 使用 Engine
     ENGINE_CONTEXT = "ENGINE_CONTEXT"
 
 

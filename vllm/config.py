@@ -2057,6 +2057,20 @@ class ParallelConfig:
 
     disable_custom_all_reduce: bool = False
     """Disable the custom all-reduce kernel and fall back to NCCL."""
+    """是否禁用自定义的 all-reduce
+    False: 使用自定义的 all-reduce 内核来获得更好的性能
+    True: 使用 NCCL
+
+    1. 自定义 all-reduce 内核:
+    - vLLM 实现了自己的 all-reduce 内核以优化性能
+    - 这些内核针对特定硬件和场景进行了优化
+    - 通常比标准 NCCL 实现有更好的性能表现
+
+    2. NCCL:
+    - NVIDIA 提供的标准集合通信库
+    - 更加通用和稳定
+    - 在某些情况下可能是更安全的选择
+    """
 
     ray_workers_use_nsight: bool = False
     """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
@@ -3339,6 +3353,7 @@ class MultiModalConfig:
 @dataclass
 class PoolerConfig:
     """Controls the behavior of output pooling in pooling models."""
+    """控制池化模型的输出池化行为"""
 
     pooling_type: Optional[str] = None
     """
