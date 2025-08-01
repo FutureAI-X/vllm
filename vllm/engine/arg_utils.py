@@ -982,21 +982,24 @@ class EngineArgs:
         provided as a JSON string input via CLI arguments or directly as a
         dictionary from the engine.
         """
+        """speculative_config 是在创建 LLM 传入的, 通过 **kwargs 传入 LLM engine, 如果没传表示不需要投机解码"""
         if self.speculative_config is None:
             return None
 
         # Note(Shangming): These parameters are not obtained from the cli arg
         # '--speculative-config' and must be passed in when creating the engine
         # config.
+        # 加入目标模型相关配置
         self.speculative_config.update({
             "target_model_config": target_model_config,
             "target_parallel_config": target_parallel_config,
             "enable_chunked_prefill": enable_chunked_prefill,
             "disable_log_stats": disable_log_stats,
         })
+        # 调用 SpeculativeConfig.from_dict 创建 SpeculativeConfig 对象
         speculative_config = SpeculativeConfig.from_dict(
             self.speculative_config)
-
+        # 执行返回
         return speculative_config
 
     def create_engine_config(
@@ -1233,7 +1236,7 @@ class EngineArgs:
             enable_multimodal_encoder_data_parallel,
         )
 
-        # Step10 推测解码配置
+        # Step10 推测解码(Speculative Decoding)配置
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,
             target_parallel_config=parallel_config,

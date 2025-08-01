@@ -1872,6 +1872,7 @@ PrefixCachingHashAlgo = Literal["builtin", "sha256", "sha256_cbor_64bit"]
 @dataclass
 class CacheConfig:
     """Configuration for the KV cache."""
+    """KV Cache Configuration"""
 
     block_size: SkipValidation[BlockSize] = None  # type: ignore
     """Size of a contiguous cache block in number of tokens. This is ignored on
@@ -1881,6 +1882,13 @@ class CacheConfig:
     This config has no static default. If left unspecified by the user, it will
     be set in `Platform.check_and_update_config()` based on the current
     platform."""
+    """缓存块的大小, 单位是 token, 在不同硬件上有不同限制
+    neuron: 忽略此参数, 设置为 --max-model-len
+    cuda: 最大32
+    hpu: 默认128
+
+    这个配置没有静态默认值, 如果用户没有指定, 则会在 Platform.check_and_update_config() 中根据当前平台设置
+    """
     gpu_memory_utilization: float = 0.9
     """The fraction of GPU memory to be used for the model executor, which can
     range from 0 to 1. For example, a value of 0.5 would imply 50% GPU memory
@@ -1889,24 +1897,42 @@ class CacheConfig:
     not matter if you have another vLLM instance running on the same GPU. For
     example, if you have two vLLM instances running on the same GPU, you can
     set the GPU memory utilization to 0.5 for each instance."""
+    """GPU内存使用比例，范围0-1。例如0.5表示使用50%的GPU内存。默认值为0.9。这是一个实例级别的限制，只适用于当前vLLM实例。"""
+
     swap_space: float = 4
     """Size of the CPU swap space per GPU (in GiB)."""
+    """每个 GPU 的 CPU 交换空间大小, 单位 GB, 默认 4GB"""
+
     cache_dtype: CacheDType = "auto"
     """Data type for kv cache storage. If "auto", will use model data type.
     CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. ROCm (AMD GPU) supports
     fp8 (=fp8_e4m3). Intel Gaudi (HPU) supports fp8 (using fp8_inc)."""
+    """KV缓存存储的数据类型。可选值包括：
+    "auto"：使用模型数据类型
+    "fp8"、"fp8_e4m3"、"fp8_e5m2"、"fp8_inc"：不同格式的FP8类型
+    不同硬件平台对FP8的支持情况不同
+    """
+
     is_attention_free: bool = False
     """Whether the model is attention-free. This is primarily set in
     `ModelConfig` and that value should be manually duplicated here."""
+    """指示模型是否为无注意力机制模型。主要在ModelConfig中设置，需要手动复制到这里。"""
+
     num_gpu_blocks_override: Optional[int] = None
     """Number of GPU blocks to use. This overrides the profiled `num_gpu_blocks`
     if specified. Does nothing if `None`. Used for testing preemption."""
+    """使用的GPU块数量。如果指定，会覆盖分析得出的num_gpu_blocks"""
+
     sliding_window: Optional[int] = None
     """Sliding window size for the KV cache. This is primarily set in
     `ModelConfig` and that value should be manually duplicated here."""
+    """KV缓存的滑动窗口大小。主要在ModelConfig中设置，需要手动复制到这里"""
+
     enable_prefix_caching: Optional[bool] = None
     """Whether to enable prefix caching. Disabled by default for V0. Enabled by
     default for V1."""
+    """是否启用前缀缓存。V0默认禁用，V1默认启用"""
+
     prefix_caching_hash_algo: PrefixCachingHashAlgo = "builtin"
     """Set the hash algorithm for prefix caching:\n
     - "builtin" is Python's built-in hash.\n
@@ -1916,6 +1942,8 @@ class CacheConfig:
     hash. It serializes objects using canonical CBOR and hashes them with
     SHA-256. The resulting hash consists of the lower 64 bits of the SHA-256
     digest."""
+    """前缀缓存的哈希算法"""
+
     cpu_offload_gb: float = 0
     """The space in GiB to offload to CPU, per GPU. Default is 0, which means
     no offloading. Intuitively, this argument can be seen as a virtual way to
@@ -1925,21 +1953,30 @@ class CacheConfig:
     Note that this requires fast CPU-GPU interconnect, as part of the model is
     loaded from CPU memory to GPU memory on the fly in each model forward pass.
     """
+    """每个GPU要卸载到CPU的空间(GiB)。默认为0，表示不卸载。可以看作是虚拟增加GPU内存的方式。"""
+
     calculate_kv_scales: bool = False
     """This enables dynamic calculation of `k_scale` and `v_scale` when
     kv_cache_dtype is fp8. If `False`, the scales will be loaded from the model
     checkpoint if available. Otherwise, the scales will default to 1.0."""
+    """当kv_cache_dtype为fp8时，是否启用动态计算k_scale和v_scale。如果为False，会从模型检查点加载 scales（如果可用），否则默认为1.0"""
+    
     cpu_kvcache_space_bytes: Optional[int] = None
     """(CPU backend only) CPU key-value cache space."""
+    """（仅CPU后端）CPU键值缓存空间"""
+
     mamba_page_size_padded: Optional[int] = None
     """ Optional override for mamba page size; used by hybrid mamba/attention
     models to ensure exact alignment with attention page size."""
+    """Mamba页面大小的可选覆盖；用于混合Mamba/注意力模型以确保与注意力页面大小精确对齐。"""
 
     # Will be set after profiling.
     num_gpu_blocks: Optional[int] = field(default=None, init=False)
     """The number of blocks to allocate for GPU memory."""
+    """分配给GPU内存的块数量。在分析后设置。"""
     num_cpu_blocks: Optional[int] = field(default=None, init=False)
     """The number of blocks to allocate for CPU memory."""
+    """分配给CPU内存的块数量。在分析后设置。"""
 
     kv_sharing_fast_prefill: bool = False
     """This feature is work in progress and no prefill optimization takes place
@@ -1950,6 +1987,7 @@ class CacheConfig:
     attention metadata for eligible layers to be overriden with metadata
     necessary for implementating this optimization in some models (e.g. Gemma3n)
     """
+    """此功能正在进行中，目前启用此标志不会进行预填充优化。 在某些KV共享设置中（如YOCO），某些层可以跳过与预填充对应的token。此标志允许为符合条件的层覆盖注意力元数据，以在某些模型（如Gemma3n）中实现此优化。"""
 
     def compute_hash(self) -> str:
         """
@@ -2050,6 +2088,7 @@ class CacheConfig:
 @dataclass
 class LoadConfig:
     """Configuration for loading the model weights."""
+    """模型权重加载配置类"""
 
     load_format: Union[str, LoadFormats] = "auto"
     """The format of the model weights to load:\n
@@ -2074,22 +2113,47 @@ class LoadConfig:
     - "mistral" will load weights from consolidated safetensors files used by
     Mistral models.
     - Other custom values can be supported via plugins."""
+    """指定模型权重的加载格式:
+    "auto": 自动检测，优先尝试 safetensors 格式，失败则回退到 PyTorch bin 格式
+    "pt": PyTorch bin 格式
+    "safetensors": Safetensors 格式
+    "npcache": PyTorch 格式但使用 numpy 缓存加速加载
+    "dummy": 使用随机值初始化权重，主要用于性能分析
+    "tensorizer": 使用 CoreWeave 的 tensorizer 库快速加载
+    "runai_streamer": 使用 Run:ai Model Streamer 加载 Safetensors 权重
+    "bitsandbytes": 使用 bitsandbytes 量化加载权重
+    "sharded_state": 从预分片的检查点文件加载，支持高效加载张量并行模型
+    "gguf": 从 GGUF 格式文件加载
+    "mistral": 加载 Mistral 模型使用的合并 safetensors 文件
+    其他自定义值可通过插件支持
+    """
+
     download_dir: Optional[str] = None
     """Directory to download and load the weights, default to the default
     cache directory of Hugging Face."""
+    """下载和加载权重的目录，默认使用 Hugging Face 的缓存目录"""
+
     model_loader_extra_config: Union[dict, TensorizerConfig] = field(
         default_factory=dict)
     """Extra config for model loader. This will be passed to the model loader
     corresponding to the chosen load_format."""
+    """型加载器的额外配置，会传递给对应 load_format 的模型加载器"""
+
     device: Optional[str] = None
     """Device to which model weights will be loaded, default to
     device_config.device"""
+    """模型权重加载的目标设备，默认使用 device_config.device"""
+
     ignore_patterns: Optional[Union[list[str], str]] = None
     """The list of patterns to ignore when loading the model. Default to
     "original/**/*" to avoid repeated loading of llama's checkpoints."""
+    """加载模型时要忽略的模式列表，默认为 ["original/**/*"] 以避免重复加载 llama 检查点"""
+
     use_tqdm_on_load: bool = True
     """Whether to enable tqdm for showing progress bar when loading model
     weights."""
+    """是否在加载模型权重时启用 tqdm 进度条"""
+
     pt_load_map_location: Union[str, dict[str, str]] = "cpu"
     """
     pt_load_map_location: the map location for loading pytorch checkpoint, to
@@ -2100,6 +2164,7 @@ class LoadConfig:
     in dictionary needs to be double quoted for json parsing. For more details,
     see original doc for `map_location` in https://pytorch.org/docs/stable/generated/torch.load.html
     """
+    """加载 PyTorch 检查点时的映射位置，支持设备间映射，如 {"cuda:1": "cuda:0"}"""
 
     def compute_hash(self) -> str:
         """
@@ -2137,14 +2202,21 @@ DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 @dataclass
 class ParallelConfig:
     """Configuration for the distributed execution."""
+    """分布式执行配置类, 定义了模型在分布式环境中的并行策略和相关设置"""
 
     pipeline_parallel_size: int = 1
     """Number of pipeline parallel groups."""
+    """流水线并行组的数量"""
+    
     tensor_parallel_size: int = 1
     """Number of tensor parallel groups."""
+    """张量并行组的数量"""
+
     data_parallel_size: int = 1
     """Number of data parallel groups. MoE layers will be sharded according to
     the product of the tensor parallel size and data parallel size."""
+    """数据并行组的数量, MoE 层将根据张量并行大小和数据并行大小进行分片"""
+
     data_parallel_size_local: int = 1
     """Number of local data parallel groups."""
     data_parallel_rank: int = 0
@@ -2234,24 +2306,31 @@ class ParallelConfig:
     worker_cls: str = "auto"
     """The full name of the worker class to use. If "auto", the worker class
     will be determined based on the platform."""
+    """要使用的 worker 类的全名, 如果为 auto 则根据 Platform 确定"""
+
     sd_worker_cls: str = "auto"
     """The full name of the worker class to use for speculative decoding.
     If "auto", the worker class will be determined based on the platform."""
+    """Speculative Decoding 要使用的 worker 类的全名, 如果为 auto 则根据 Platform 确定"""
+
     worker_extension_cls: str = ""
     """The full name of the worker extension class to use. The worker extension
     class is dynamically inherited by the worker class. This is used to inject
     new attributes and methods to the worker class for use in collective_rpc
     calls."""
+    """要使用的 worker 扩展类的全名"""
 
     world_size: int = field(init=False)
     """world_size is TPxPP, it affects the number of workers we create."""
 
     rank: int = 0
     """Global rank in distributed setup."""
+    """分布式设置中的全局 rank"""
 
     enable_multimodal_encoder_data_parallel: bool = False
     """ Use data parallelism instead of tensor parallelism for vision encoder.
     Only support LLama4 for now"""
+    """是否对视觉编码器使用数据并行而非张量并行，目前仅支持 Llama4"""
 
     @property
     def world_size_across_dp(self) -> int:
@@ -2867,14 +2946,22 @@ SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "medusa",
 @dataclass
 class SpeculativeConfig:
     """Configuration for speculative decoding."""
+    """投机解码配置类"""
 
     # General speculative decoding control
     num_speculative_tokens: SkipValidation[int] = None  # type: ignore
     """The number of speculative tokens, if provided. It will default to the
     number in the draft model config if present, otherwise, it is required."""
+    """
+    指定要生成的 draft token 数量
+    如果未提供，将默认使用草稿模型配置中的值，否则为必需参数
+    """
+
     model: Optional[str] = None
     """The name of the draft model, eagle head, or additional weights, if
     provided."""
+    """ draft model name, eagle head, 或 附加权重"""
+
     method: Optional[SpeculativeMethod] = None
     """The name of the speculative method to use. If users provide and set the
     `model` param, the speculative method type will be detected automatically
@@ -2883,66 +2970,105 @@ class SpeculativeConfig:
 
     If using `ngram` method, the related configuration `prompt_lookup_max` and
     `prompt_lookup_min` should be considered."""
+    """
+    投机解码方法
+    - 如果用户提供了model参数, 推测方法类型将自动检测 (如果可能)
+    - 如果未提供model参数, 则必须提供方法名称
+    - 如果使用ngram方法, 则应该考虑相关的配置prompt_lookup_max和prompt_lookup_min
+    """
+
     draft_tensor_parallel_size: Optional[int] = None
     """The degree of the tensor parallelism for the draft model. Can only be 1
     or the same as the target model's tensor parallel size."""
+    """草稿模型的张量并行度。只能是1或与目标模型的张量并行大小相同。"""
+
     disable_logprobs: bool = True
     """If set to True, token log probabilities are not returned during
     speculative decoding. If set to False, token log probabilities are returned
     according to the log probability settings in SamplingParams."""
+    """
+    控制是否在推测解码期间返回token对数概率。
+    设置为True时不返回，设置为False时根据SamplingParams中的对数概率设置返回。
+    """
 
     # Draft model configuration
     quantization: Optional[me_quant.QuantizationMethods] = None
     """Quantization method that was used to quantize the draft model weights.
     If `None`, we assume the model weights are not quantized. Note that it only
     takes effect when using the draft model-based speculative method."""
+    """
+    用于量化草稿模型权重的量化方法。如果为None，则假定模型权重未量化。注意，这仅在使用基于草稿模型的推测方法时生效。
+    """
+
     max_model_len: Optional[int] = None
     """The maximum model length of the draft model. Used when testing the
     ability to skip speculation for some sequences."""
+    """草稿模型的最大模型长度。用于测试跳过某些序列推测的能力。"""
+
     revision: Optional[str] = None
     """The specific model version to use for the draft model. It can be a
     branch name, a tag name, or a commit id. If unspecified, will use the
     default version."""
+    """草稿模型使用的特定模型版本。可以是分支名、标签名或提交ID。如果未指定，将使用默认版本。"""
+
     code_revision: Optional[str] = None
     """The specific revision to use for the draft model code on Hugging Face
     Hub. It can be a branch name, a tag name, or a commit id. If unspecified,
     will use the default version."""
+    """
+    Hugging Face Hub上草稿模型代码的特定修订版本。可以是分支名、标签名或提交ID。如果未指定，将使用默认版本。
+    """
 
     # Advanced control
     disable_by_batch_size: Optional[int] = None
     """Disable speculative decoding for new incoming requests when the number
     of enqueued requests is larger than this value, if provided."""
+    """当排队请求数量大于此值时，对新传入请求禁用推测解码（如果提供此参数）"""
 
     # Ngram proposer configuration
     prompt_lookup_max: Optional[int] = None
     """Maximum size of ngram token window when using Ngram proposer, required
     when method is set to ngram."""
+    """使用Ngram提议器时ngram token窗口的最大大小。当方法设置为ngram时为必需参数。"""
     prompt_lookup_min: Optional[int] = None
     """Minimum size of ngram token window when using Ngram proposer, if
     provided. Defaults to 1."""
+    """使用Ngram提议器时ngram token窗口的最小大小, 默认值为1"""
 
     speculative_token_tree: Optional[str] = None
     """Specifies the tree structure for speculative token generation.
     """
+    """指定Speculative token生成的树结构"""
+
     # required configuration params passed from engine
     target_model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """The configuration of the target model."""
+    """目标模型的配置"""
+
     target_parallel_config: SkipValidation[
         ParallelConfig] = None  # type: ignore
     """The parallel configuration for the target model."""
+    """目标模型的并行配置"""
+
     enable_chunked_prefill: SkipValidation[bool] = None  # type: ignore
     """Whether vLLM is configured to use chunked prefill or not. Used for
     raising an error since it's not yet compatible with speculative decode."""
+    """指示vLLM是否配置为使用分块预填充。用于引发错误，因为它尚未与推测解码兼容"""
+
     disable_log_stats: SkipValidation[bool] = None  # type: ignore
     """Whether to disable the periodic printing of stage times in speculative
     decoding."""
+    """是否禁用推测解码中阶段时间的周期性打印"""
 
     # params generated in the post-init stage
     draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """The configuration of the draft model initialized internal."""
+    """draft model 初始化时的配置"""
+
     draft_parallel_config: SkipValidation[
         ParallelConfig] = None  # type: ignore
     """The parallel configuration for the draft model initialized internal."""
+    """draft model 初始化时的并行配置"""
 
     def compute_hash(self) -> str:
         """
@@ -2967,6 +3093,7 @@ class SpeculativeConfig:
     @classmethod
     def from_dict(cls, dict_value: dict) -> "SpeculativeConfig":
         """Parse the CLI value for the speculative config."""
+        """从 speculative config 解析类配置"""
         return cls(**dict_value)
 
     @staticmethod
@@ -3896,28 +4023,34 @@ GuidedDecodingBackend = Literal["auto", "xgrammar", "guidance", "outlines"]
 @dataclass
 class DecodingConfig:
     """Dataclass which contains the decoding strategy of the engine."""
+    """vLLM Engine 解码策略的数据类,"""
 
     backend: GuidedDecodingBackend = "auto"
     """Which engine will be used for guided decoding (JSON schema / regex etc)
     by default. With "auto", we will make opinionated choices based on request
     contents and what the backend libraries currently support, so the behavior
     is subject to change in each release."""
+    """引导解码的引擎"""
 
     disable_fallback: bool = False
     """If `True`, vLLM will not fallback to a different backend on error."""
+    """控制是否在出错时回推到不同的后端"""
 
     disable_any_whitespace: bool = False
     """If `True`, the model will not generate any whitespace during guided
     decoding. This is only supported for xgrammar and guidance backends."""
+    """控制在引导解码期间是否生成空白字符"""
 
     disable_additional_properties: bool = False
     """If `True`, the `guidance` backend will not use `additionalProperties`
     in the JSON schema. This is only supported for the `guidance` backend and
     is used to better align its behaviour with `outlines` and `xgrammar`."""
+    """控制 guidance 后端在 JSON schema 中是否使用 additionalProperties"""
 
     reasoning_backend: str = ""
     """Select the reasoning parser depending on the model that you're using.
     This is used to parse the reasoning content into OpenAI API format."""
+    """根据使用的模型选择推理解析器，用于将推理内容解析为 OpenAI API 格式"""
 
     def compute_hash(self) -> str:
         """
@@ -3955,6 +4088,7 @@ DetailedTraceModules = Literal["model", "worker", "all"]
 @dataclass
 class ObservabilityConfig:
     """Configuration for observability - metrics and tracing."""
+    """可观察性配置, 监控和跟踪配置"""
 
     show_hidden_metrics_for_version: Optional[str] = None
     """Enable deprecated Prometheus metrics that have been hidden since the
@@ -3963,10 +4097,14 @@ class ObservabilityConfig:
     `--show-hidden-metrics-for-version=0.7` as a temporary escape hatch while
     you migrate to new metrics. The metric is likely to be removed completely
     in an upcoming release."""
+    """于启用已被隐藏的旧版 Prometheus 指标
+    当某些指标在特定版本中被标记为废弃并隐藏时，可以通过此配置临时重新启用
+    例如：如果指标在 v0.7.0 版本中被隐藏，可以使用 --show-hidden-metrics-for-version=0.7 来重新启用"""
 
     @cached_property
     def show_hidden_metrics(self) -> bool:
         """Check if the hidden metrics should be shown."""
+        """检查是否显示隐藏的指标"""
         if self.show_hidden_metrics_for_version is None:
             return False
         return version._prev_minor_version_was(
@@ -3974,6 +4112,7 @@ class ObservabilityConfig:
 
     otlp_traces_endpoint: Optional[str] = None
     """Target URL to which OpenTelemetry traces will be sent."""
+    """OpenTelemetry 追踪数据的目标 URL, 指定将追踪数据发送到的 OpenTelemetry 收集器端点"""
 
     collect_detailed_traces: Optional[list[DetailedTraceModules]] = None
     """It makes sense to set this only if `--otlp-traces-endpoint` is set. If
@@ -3983,10 +4122,14 @@ class ObservabilityConfig:
 
     Note that collecting detailed timing information for each request can be
     expensive."""
+    """指定需要收集详细追踪信息的模块列表
+    可以针对特定模块（如 "model"、"worker"）收集详细的性能追踪数据
+    包含可能影响性能的阻塞操作，因此使用时需要注意性能影响"""
 
     @cached_property
     def collect_model_forward_time(self) -> bool:
         """Whether to collect model forward time for the request."""
+        """是否收集模型前向时间"""
         return (self.collect_detailed_traces is not None
                 and ("model" in self.collect_detailed_traces
                      or "all" in self.collect_detailed_traces))
@@ -3994,6 +4137,7 @@ class ObservabilityConfig:
     @cached_property
     def collect_model_execute_time(self) -> bool:
         """Whether to collect model execute time for the request."""
+        """判断是否收集模型执行时间"""
         return (self.collect_detailed_traces is not None
                 and ("worker" in self.collect_detailed_traces
                      or "all" in self.collect_detailed_traces))
