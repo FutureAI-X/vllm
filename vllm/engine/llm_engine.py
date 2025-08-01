@@ -483,14 +483,23 @@ class LLMEngine:
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
     ) -> "LLMEngine":
         """Creates an LLM engine from the engine arguments."""
+        """根据 engine 参数创建 LLM engine
+        
+        Args:
+            cls: 指当前类, @classmethod 修饰的方法, 调用此方法时, Python 自动传入
+        """
+        
+        # Step1 创建 Engine 配置
         # Create the engine configs.
         vllm_config = engine_args.create_engine_config(usage_context)
 
+        # Step2 判断是否使用 V1 版本
         engine_cls = cls
         if envs.VLLM_USE_V1:
             from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
             engine_cls = V1LLMEngine
 
+        # Step3 执行 Engine 创建
         return engine_cls.from_vllm_config(
             vllm_config=vllm_config,
             usage_context=usage_context,

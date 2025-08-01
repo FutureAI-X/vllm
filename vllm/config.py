@@ -284,31 +284,83 @@ class ModelConfig:
     """Name or path of the Hugging Face model to use. It is also used as the
     content for `model_name` tag in metrics output when `served_model_name` is
     not specified."""
+    """
+    Hugging Face model name or path.
+    同时用做 指标输出的 model_name 标签 (served_model_name 未指定时)
+    """
+
     runner: RunnerOption = "auto"
     """The type of model runner to use. Each vLLM instance only supports one
     model runner, even if the same model can be used for multiple types."""
+    """
+    模型运行器类型, 每个 vllm 实例只支持一种模型运行器，即使同一模型可用于多种类型
+    1. auto
+    自动模式, 让 vLLM 自动选择和时的运行器类型
+    行为: 根据模型架构自动选择最合适的运行器类型, 通常会根据模型的 architectures 字段和注册信息来决定
+
+    2. generate
+    生成模式, 用于文本生成任务
+    适用模型: 语言模型(GPT、 Llama 系列)、对话模型
+    典型架构: ForCausalLM, ForConditionalGeneration, ChatModel, LMHeadModel
+    任务类型: 文本补全, 对话生成, 创意写作, 代码生成
+
+    3. pooling
+    池化模式, 用于文本理解, 嵌入和分类任务的运行器
+    适用模型: 句子嵌入模型(Sentence Transformers), 文本分类模型, 奖励模型(Reward Models), 嵌入模型(Embedding Models)
+    典型架构: ForTextEncoding, EmbeddingModel, ForSequenceClassification, ForAudioClassification, ForVideoClassification
+             ForImageClassification, ClassificationModel, ForRewardModeling, RewardModel
+    任务类型: 文本嵌入(embedding), 文本分类(classify), 奖励建模(reward), 语义相似度计算, 文本聚类
+
+    4. draft
+    草稿模型, 用于推测解码(Speculative Decoding)中的草稿模型
+    适用场景: 作为推测解码中的辅助模型, 用于生成候选序列以加速主模型的推理
+    特点: 通常时一个较小的模型, 用于提高主模型的推理速度
+
+    """
+
     convert: ConvertOption = "auto"
     """Convert the model using adapters defined in
     [vllm.model_executor.models.adapters][]. The most common use case is to
     adapt a text generation model to be used for pooling tasks."""
+    """
+    使用 [vllm.model_executor.models.adapters] 中的适配器转换模型, 最常见的用例是将文本生成模型适配未用于池化任务
+    """
+
     task: Optional[TaskOption] = None
     """[DEPRECATED] The task to use the model for. If the model supports more
     than one model runner, this is used to select which model runner to run.
 
     Note that the model may support other tasks using the same model runner.
     """
+    """
+    [已弃用] 制定模型的任务类型, 如果模型支持多个运行器, 用于选择使用哪个运行器运行模型
+    注意模型可能支持使用相同运行器运行其他其他任务
+    """
+
     tokenizer: SkipValidation[str] = None  # type: ignore
     """Name or path of the Hugging Face tokenizer to use. If unspecified, model
     name or path will be used."""
+    """Hugging Face tokenizer name or path. 如果未制定, 将使用模型名称或路径"""
+
     tokenizer_mode: TokenizerMode = "auto"
     """Tokenizer mode:\n
     - "auto" will use the fast tokenizer if available.\n
     - "slow" will always use the slow tokenizer.\n
     - "mistral" will always use the tokenizer from `mistral_common`.\n
     - "custom" will use --tokenizer to select the preregistered tokenizer."""
+    """
+    tokenizer 模式:
+    - "auto" 优先使用 fast tokenizer.
+    - "slow" 将始终使用 slow tokenizer.
+    - "mistral" 将始终使用 `mistral_common` 中的 tokenizer.
+    - "custom" 将使用 --tokenizer 参数来选择已注册的 tokenizer.
+    """
+
     trust_remote_code: bool = False
     """Trust remote code (e.g., from HuggingFace) when downloading the model
     and tokenizer."""
+    """当下载模型和 tokenizer 时是否信任远程代码 (例如, 来自 HuggingFace) """
+
     dtype: Union[ModelDType, torch.dtype] = "auto"
     """Data type for model weights and activations:\n
     - "auto" will use FP16 precision for FP32 and FP16 models, and BF16
@@ -318,12 +370,18 @@ class ModelConfig:
     - "bfloat16" for a balance between precision and range.\n
     - "float" is shorthand for FP32 precision.\n
     - "float32" for FP32 precision."""
+    """模型权重和激活数据的数据类型:"""
+
     seed: Optional[int] = None
     """Random seed for reproducibility. Initialized to None in V0, but
     initialized to 0 in V1."""
+    """随机种子, 以确保可重现性. V0 中默认为 None, V1 中默认为 0"""
+
     hf_config_path: Optional[str] = None
     """Name or path of the Hugging Face config to use. If unspecified, model
     name or path will be used."""
+    """HuggingFace Config 的 name or path, 如果未指定, 将使用模型名称或路径"""
+
     allowed_local_media_path: str = ""
     """Allowing API requests to read local images or videos from directories
     specified by the server file system. This is a security risk. Should only
@@ -331,20 +389,30 @@ class ModelConfig:
     revision: Optional[str] = None
     """The specific model version to use. It can be a branch name, a tag name,
     or a commit id. If unspecified, will use the default version."""
+    """指定模型版本, 可以是分支名, 标签名或提交 id. 如果未指定, 将使用默认版本"""
+
     code_revision: Optional[str] = None
     """The specific revision to use for the model code on the Hugging Face Hub.
     It can be a branch name, a tag name, or a commit id. If unspecified, will
     use the default version."""
+    """指定模型代码的特定版本, 可以是分支名, 标签名或提交 id. 如果未指定, 将使用默认版本"""
+
     rope_scaling: dict[str, Any] = field(default_factory=dict)
     """RoPE scaling configuration. For example,
     `{"rope_type":"dynamic","factor":2.0}`."""
+    """RoPE 缩放配置"""
+
     rope_theta: Optional[float] = None
     """RoPE theta. Use with `rope_scaling`. In some cases, changing the RoPE
     theta improves the performance of the scaled model."""
+    """RoPE theta, 以 rope_scaling 一起使用, 在某些情况下, 修改 RoPE theta 可以提高缩放模型的性能"""
+    
     tokenizer_revision: Optional[str] = None
     """The specific revision to use for the tokenizer on the Hugging Face Hub.
     It can be a branch name, a tag name, or a commit id. If unspecified, will
     use the default version."""
+    """指定 tokenizer 的特定版本, 可以是分支名, 标签名或提交 id. 如果未指定, 将使用默认版本"""
+
     max_model_len: SkipValidation[int] = None  # type: ignore
     """Model context length (prompt and output). If unspecified, will be
     automatically derived from the model config.
@@ -354,27 +422,39 @@ class ModelConfig:
     - 1k -> 1000\n
     - 1K -> 1024\n
     - 25.6k -> 25,600"""
+    """模型上下文长度 (提示和输出). 如果未指定, 将自动从模型配置中获取"""
+
     spec_target_max_model_len: Optional[int] = None
     """Specify the maximum length for spec decoding draft models."""
+    """指定用于 spec 模型解码的 draft 模型最大长度"""
+
     quantization: SkipValidation[Optional[QuantizationMethods]] = None
     """Method used to quantize the weights. If `None`, we first check the
     `quantization_config` attribute in the model config file. If that is
     `None`, we assume the model weights are not quantized and use `dtype` to
     determine the data type of the weights."""
+    """量化方法, 如果为 None, 则会检查模型配置文件中的 quantization_config 属性. 如果为 None, 则认为模型权重未量化, 并使用 dtype 来确定权重的数据类型"""
+    
     enforce_eager: bool = False
     """Whether to always use eager-mode PyTorch. If True, we will disable CUDA
     graph and always execute the model in eager mode. If False, we will use
     CUDA graph and eager execution in hybrid for maximal performance and
     flexibility."""
+    """始终使用 eager-mode PyTorch. 如果为 True, 则将禁用 CUDA graph 并始终在 eager 模式下执行模型. 如果为 False, 则使用 CUDA graph 和 eager 模式执行混合, 以获得最佳性能和灵活性"""
+    
     max_seq_len_to_capture: int = 8192
     """Maximum sequence len covered by CUDA graphs. When a sequence has context
     length larger than this, we fall back to eager mode. Additionally for
     encoder-decoder models, if the sequence length of the encoder input is
     larger than this, we fall back to the eager mode."""
+    """CUDA 图覆盖的最大序列长度, 当序列长度大于此值时, 将回退到 eager 模式."""
+
     max_logprobs: int = 20
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
     OpenAI Chat Completions API."""
+    """返回的 logprobs 最大数量"""
+
     logprobs_mode: LogprobsMode = "raw_logprobs"
     """Indicates the content returned in the logprobs and prompt_logprobs.
     Supported mode:
@@ -382,24 +462,34 @@ class ModelConfig:
     Raw means the values before applying logit processors, like bad words.
     Processed means the values after applying such processors.
     """
+    """logprobs 模式"""
+
     disable_sliding_window: bool = False
     """Whether to disable sliding window. If True, we will disable the sliding
     window functionality of the model, capping to sliding window size. If the
     model does not support sliding window, this argument is ignored."""
+    """禁用滑动窗口. 如果为 True, 禁用滑动窗口功能，限制到滑动窗口大小."""
+
     disable_cascade_attn: bool = False
     """Disable cascade attention for V1. While cascade attention does not
     change the mathematical correctness, disabling it could be useful for
     preventing potential numerical issues. Note that even if this is set to
     False, cascade attention will be only used when the heuristic tells that
     it's beneficial."""
+    """V1 禁用级联注意力. 级联注意力不会改变数学正确性, 禁用它有助于防止潜在的数值问题."""
+
     skip_tokenizer_init: bool = False
     """Skip initialization of tokenizer and detokenizer. Expects valid
     `prompt_token_ids` and `None` for prompt from the input. The generated
     output will contain token ids."""
+    """跳过 tokenizer 和 detokenizer 的初始化. 期望输入中有 prompt_token_ids 且 prompt 为 None"""
+
     enable_prompt_embeds: bool = False
     """If `True`, enables passing text embeddings as inputs via the
     `prompt_embeds` key. Note that enabling this will double the time required
     for graph compilation."""
+    """如为 True，允许通过 prompt_embeds 键传递文本嵌入作为输入, 启用此功能会使图编译时间加倍"""
+
     served_model_name: Optional[Union[str, list[str]]] = None
     """The model name(s) used in the API. If multiple names are provided, the
     server will respond to any of the provided names. The model name in the
@@ -408,56 +498,90 @@ class ModelConfig:
     that this name(s) will also be used in `model_name` tag content of
     prometheus metrics, if multiple names provided, metrics tag will take the
     first one."""
+    """API中使用的模型名称"""
+
     limit_mm_per_prompt: dict[str, int] = field(default_factory=dict)
     """Maximum number of data items per modality per prompt. Only applicable
     for multimodal models."""
+    """多模态模型中每个模态每个提示的最大数据项数"""
+
     interleave_mm_strings: bool = False
     """Enable fully interleaved support for multimodal prompts, while using
     --chat-template-content-format=string. Defaults to False."""
+    """为多模态提示启用完全交错支持"""
+
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
     """Additional args passed to process media inputs, keyed by modalities.
     For example, to set num_frames for video, set
     `--media-io-kwargs '{"video": {"num_frames": 40} }'` """
+    """传递给媒体输入处理的附加参数，按键值对形式组织"""
+
     use_async_output_proc: bool = True
     """Whether to use async output processor."""
+    """是否使用异步输出处理器"""
+
     config_format: Union[str, ConfigFormat] = ConfigFormat.AUTO.value
     """The format of the model config to load:\n
     - "auto" will try to load the config in hf format if available else it
     will try to load in mistral format.\n
     - "hf" will load the config in hf format.\n
     - "mistral" will load the config in mistral format."""
+    """要加载的模型配置格式:
+    - "auto"：尝试加载 hf 格式，如不可用则尝试加载 mistral 格式
+    - "hf"：加载 hf 格式配置
+    - "mistral"：加载 mistral 格式配置
+    """
+
     hf_token: Optional[Union[bool, str]] = None
     """The token to use as HTTP bearer authorization for remote files . If
     `True`, will use the token generated when running `huggingface-cli login`
     (stored in `~/.huggingface`)."""
+    """用于远程文件的 HTTP bearer 授权令牌"""
+
     hf_overrides: HfOverrides = field(default_factory=dict)
     """If a dictionary, contains arguments to be forwarded to the Hugging Face
     config. If a callable, it is called to update the HuggingFace config."""
+    """
+    如为字典，包含要转发给 Hugging Face 配置的参数
+    如为可调用对象，调用它来更新 HuggingFace 配置
+    """
+
     mm_processor_kwargs: Optional[dict[str, Any]] = None
     """Arguments to be forwarded to the model's processor for multi-modal data,
     e.g., image processor. Overrides for the multi-modal processor obtained
     from `AutoProcessor.from_pretrained`. The available overrides depend on the
     model that is being run. For example, for Phi-3-Vision: `{"num_crops": 4}`.
     """
+    """转发给模型多模态处理器的参数"""
+
     disable_mm_preprocessor_cache: bool = False
     """If `True`, disable caching of the multi-modal preprocessor/mapper (not
     recommended)."""
+    """如为 True，禁用多模态预处理器/映射器的缓存（不推荐）"""
+    
     override_neuron_config: dict[str, Any] = field(default_factory=dict)
     """Initialize non-default neuron config or override default neuron config
     that are specific to Neuron devices, this argument will be used to
     configure the neuron config that can not be gathered from the vllm
     arguments. e.g. `{"cast_logits_dtype": "bfloat16"}`."""
+    """初始化非默认的 Neuron 配置或覆盖默认的 Neuron 配置"""
+
     pooler_config: Optional["PoolerConfig"] = field(init=False)
     """Pooler config which controls the behaviour of output pooling in pooling
     models."""
+    """控制池化模型输出池化行为的池化器配置"""
+
     override_pooler_config: Optional[Union[dict, "PoolerConfig"]] = None
     """Initialize non-default pooling config or override default pooling config
     for the pooling model. e.g. `{"pooling_type": "mean", "normalize": false}`.
     """
+    """覆盖默认池化配置"""
+
     logits_processor_pattern: Optional[str] = None
     """Optional regex pattern specifying valid logits processor qualified names
     that can be passed with the `logits_processors` extra completion argument.
     Defaults to `None`, which allows no processors."""
+
     generation_config: str = "auto"
     """The folder path to the generation config. Defaults to `"auto"`, the
     generation config will be loaded from model path. If set to `"vllm"`, no
@@ -465,13 +589,24 @@ class ModelConfig:
     path, the generation config will be loaded from the specified folder path.
     If `max_new_tokens` is specified in generation config, then it sets a
     server-wide limit on the number of output tokens for all requests."""
+    """
+    生成配置的文件夹路径
+    "auto"：从模型路径加载生成配置
+    "vllm"：不加载生成配置，使用 vLLM 默认值
+    文件夹路径：从指定文件夹路径加载生成配置
+    """
+
     override_generation_config: dict[str, Any] = field(default_factory=dict)
     """Overrides or sets generation config. e.g. `{"temperature": 0.5}`. If
     used with `--generation-config auto`, the override parameters will be
     merged with the default config from the model. If used with
     `--generation-config vllm`, only the override parameters are used."""
+    """覆盖或设置生成配置"""
+
     enable_sleep_mode: bool = False
     """Enable sleep mode for the engine (only cuda platform is supported)."""
+    """为引擎启用睡眠模式（仅支持 CUDA 平台）"""
+
     model_impl: Union[str, ModelImpl] = ModelImpl.AUTO.value
     """Which implementation of the model to use:\n
     - "auto" will try to use the vLLM implementation, if it exists, and fall
@@ -479,8 +614,16 @@ class ModelConfig:
     available.\n
     - "vllm" will use the vLLM model implementation.\n
     - "transformers" will use the Transformers model implementation."""
+    """
+    要使用的模型实现：
+    "auto"：尝试使用 vLLM 实现，如不可用则回退到 Transformers 实现
+    "vllm"：使用 vLLM 模型实现
+    "transformers"：使用 Transformers 模型实现
+    """
+
     override_attention_dtype: Optional[str] = None
     """Override dtype for attention"""
+    """覆盖注意力的数据类型"""
 
     def compute_hash(self) -> str:
         """

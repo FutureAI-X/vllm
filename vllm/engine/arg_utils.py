@@ -873,16 +873,20 @@ class EngineArgs:
         return engine_args
 
     def create_model_config(self) -> ModelConfig:
+        """创建 ModelConfig"""
         # gguf file needs a specific model loader and doesn't use hf_repo
+        # 检查是否是 GGUF 类型, 如果是 GGUF 文件则使用 GGUF 加载器
         if check_gguf_file(self.model):
             self.quantization = self.load_format = "gguf"
 
         # NOTE: This is to allow model loading from S3 in CI
+        # NOTE: 用于支持在 CI 环境中从 S3 存储同加载模型权重,
         if (not isinstance(self, AsyncEngineArgs) and envs.VLLM_CI_USE_S3
                 and self.model in MODELS_ON_S3 and self.load_format == "auto"):
             self.model = f"{MODEL_WEIGHTS_S3_BUCKET}/{self.model}"
             self.load_format = "runai_streamer"
 
+        # 创建 ModelConfig 对象
         return ModelConfig(
             model=self.model,
             hf_config_path=self.hf_config_path,
@@ -1013,33 +1017,58 @@ class EngineArgs:
         If VLLM_USE_V1 is specified by the user but the VllmConfig
         is incompatible, we raise an error.
         """
+        """
+        创建 VllmConfig
+
+        NOTE: 为了自动字段 V0 vs V1 引擎，我们需要先创建 ModelConfig,
+        因为 ModelConfig 的属性（例如模型架构）是判断的必要条件。
+
+        如果用户未指定 VLLM_USE_V1, 此函数将其设置为 X
+        如果用户指定了V LLM_USE_V1, 但 VllmConfig 不兼容，我们会抛出一个错误
+        """
+
+        # Step1 获取平台与设备信息
+        # 1. 平台信息
         current_platform.pre_register_and_update()
 
+        # 2. device 配置
         device_config = DeviceConfig(
             device=cast(Device, current_platform.device_type))
+        
+        # Step2 创建 ModelConfig
         model_config = self.create_model_config()
 
+        # Step3 V1 引擎选择
         # * If VLLM_USE_V1 is unset, we enable V1 for "supported features"
         #   and fall back to V0 for experimental or unsupported features.
         # * If VLLM_USE_V1=1, we enable V1 for supported + experimental
         #   features and raise error for unsupported features.
         # * If VLLM_USE_V1=0, we disable V1.
+        # 初始化为 False, 表示默认不使用 V1 引擎
         use_v1 = False
+        # 如果环境变量 VLLM_USE_V1 为 True, 或为设置 VLLM_USE_V1, 尝试使用 V1 引擎
         try_v1 = envs.VLLM_USE_V1 or not envs.is_set("VLLM_USE_V1")
+        # 同时判断模型是否支持 V1 引擎
         if try_v1 and self._is_v1_supported_oracle(model_config):
             use_v1 = True
 
         # If user explicitly set VLLM_USE_V1, sanity check we respect it.
+        # 如果用户设置了 VLLM_USE_V1, 检查是否与当前设置一致
         if envs.is_set("VLLM_USE_V1"):
             assert use_v1 == envs.VLLM_USE_V1
         # Otherwise, set the VLLM_USE_V1 variable globally.
+        # 否则，设置环境变量 VLLM_USE_V1
         else:
             envs.set_vllm_use_v1(use_v1)
 
         # Set default arguments for V0 or V1 Engine.
+        # 设置 V0 或 V1 引擎的默认参数
         if use_v1:
+            # 设置 V1 引擎的默认参数
             self._set_default_args_v1(usage_context, model_config)
             # Disable chunked prefill for POWER (ppc64le)/ARM CPUs in V1
+            # 对于 POWER (ppc64le) 和 ARM CPU 平台，禁用 chunked prefill 功能，因为这些平台不支持
+            # NOTE: Chunked Prefill（分块预填充）是一种将长序列的prefill阶段分割成多个较小块进行处理的技术, 可以提高 prefill 效率
             if current_platform.is_cpu(
             ) and current_platform.get_cpu_architecture() in (
                     CpuArchEnum.POWERPC, CpuArchEnum.ARM):
@@ -1048,9 +1077,11 @@ class EngineArgs:
                     "disabling it for V1 backend.")
                 self.enable_chunked_prefill = False
         else:
+            # 设置 V0 引擎的默认参数
             self._set_default_args_v0(model_config)
         assert self.enable_chunked_prefill is not None
 
+        # Step4 特殊后端检查
         if envs.VLLM_ATTENTION_BACKEND in [STR_DUAL_CHUNK_FLASH_ATTN_VAL]:
             assert self.enforce_eager, (
                 "Cuda graph is not supported with DualChunkFlashAttention. "
@@ -1062,6 +1093,7 @@ class EngineArgs:
                 "DualChunkFlashAttention is not supported on V1 engine. "
                 "To run the model in V0 engine, try set 'VLLM_USE_V1=0'")
 
+        # Step5 创建 KV CacheConfig
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
@@ -1077,6 +1109,7 @@ class EngineArgs:
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
         )
 
+        # Step6 分布式配置
         # Get the current placement group if Ray is initialized and
         # we are in a Ray actor. If so, then the placement group will be
         # passed to spawned processes.
@@ -1088,6 +1121,7 @@ class EngineArgs:
             # but we should not do this here.
             placement_group = ray.util.get_current_placement_group()
 
+        # Step7 数据并行配置
         assert not headless or not self.data_parallel_hybrid_lb, (
             "data_parallel_hybrid_lb is not applicable in "
             "headless mode")
@@ -1149,6 +1183,7 @@ class EngineArgs:
             self.data_parallel_rpc_port
             is not None) else ParallelConfig.data_parallel_rpc_port
 
+        # Step8 异步调度检查
         if self.async_scheduling:
             # Async scheduling does not work with the uniprocess backend.
             if self.distributed_executor_backend is None:
@@ -1169,6 +1204,7 @@ class EngineArgs:
                     "Currently, speculative decoding is not supported with "
                     "async scheduling.")
 
+        # Step9 创建并行配置
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
@@ -1197,6 +1233,7 @@ class EngineArgs:
             enable_multimodal_encoder_data_parallel,
         )
 
+        # Step10 推测解码配置
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,
             target_parallel_config=parallel_config,
@@ -1204,6 +1241,7 @@ class EngineArgs:
             disable_log_stats=self.disable_log_stats,
         )
 
+        # Step11 创建 SchedulerConfig (调度配置)
         # Reminder: Please update docs/features/compatibility_matrix.md
         # If the feature combo become valid
         if self.num_scheduler_steps > 1:
@@ -1253,6 +1291,7 @@ class EngineArgs:
             async_scheduling=self.async_scheduling,
         )
 
+        # Step12 创建 LoRAConfig (LoRA配置)
         if not model_config.is_multimodal_model and self.default_mm_loras:
             raise ValueError(
                 "Default modality-specific LoRA(s) were provided for a "
@@ -1269,12 +1308,14 @@ class EngineArgs:
             max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
             and self.max_cpu_loras > 0 else None) if self.enable_lora else None
 
+        # Step13 创建 LoadConfig (加载配置)
         # bitsandbytes pre-quantized model need a specific model loader
         if model_config.quantization == "bitsandbytes":
             self.quantization = self.load_format = "bitsandbytes"
 
         load_config = self.create_load_config()
 
+        # Step14 创建 DecodingConfig (Doecde 解码配置)
         decoding_config = DecodingConfig(
             backend=self.guided_decoding_backend,
             disable_fallback=self.guided_decoding_disable_fallback,
@@ -1284,6 +1325,7 @@ class EngineArgs:
             reasoning_backend=self.reasoning_parser
         )
 
+        # Step15 创建 ObservabilityConfig (可观测性配置)
         observability_config = ObservabilityConfig(
             show_hidden_metrics_for_version=(
                 self.show_hidden_metrics_for_version),
@@ -1291,6 +1333,7 @@ class EngineArgs:
             collect_detailed_traces=self.collect_detailed_traces,
         )
 
+        # Step16 创建 VllmConfig (最终配置组合)
         config = VllmConfig(
             model_config=model_config,
             cache_config=cache_config,

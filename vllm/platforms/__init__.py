@@ -286,3 +286,16 @@ __all__ = [
     'Platform', 'PlatformEnum', 'current_platform', 'CpuArchEnum',
     "_init_trace"
 ]
+
+"""关于 current_platform 的初始化说明
+
+当用户这样访问时:
+platform = vllm.platforms.current_platform
+
+实际发生的是:
+1. Python 在模块中找不到 current_platform 属性
+2. 发现模块定义了 __getattr__ 方法
+3. 调用 __getattr__('current_platform')
+4. 在 __getattr__ 中执行初始化逻辑
+5. 返回初始化后的平台实例
+"""
