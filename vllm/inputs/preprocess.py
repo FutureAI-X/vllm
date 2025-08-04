@@ -26,6 +26,7 @@ logger = init_logger(__name__)
 
 
 class InputPreprocessor:
+    """此类是 vLLM 库中用于预处理模型输入的核心组件。负责将各种类型的输入 (如文本、token ID、嵌入向量、多模态数据等)转换为模型可以理解和处理的格式"""
 
     def __init__(
         self,
@@ -33,6 +34,13 @@ class InputPreprocessor:
         tokenizer: Optional[TokenizerGroup],
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ) -> None:
+        """类的初始化
+
+        Args:
+            model_config    模型配置
+            tokenizer       分词器
+            mm_registry     多模态注册表
+        """
         super().__init__()
 
         self.model_config = model_config
@@ -840,6 +848,7 @@ class InputPreprocessor:
         return_mm_hashes: bool = False,
     ) -> ProcessorInputs:
         """Preprocess the input prompt."""
+        # Step1 Encoder Decoder Model
         if self.model_config.is_encoder_decoder:
             assert not return_mm_hashes, (
                 "Multimodal hashes for encoder-decoder models should not be ",
@@ -853,6 +862,7 @@ class InputPreprocessor:
             raise ValueError("Cannot pass encoder-decoder prompt "
                              "to decoder-only models")
 
+        # Step2 Decoder Only Model
         # Decoder-only operation
         return self._process_decoder_only_prompt(
             prompt,

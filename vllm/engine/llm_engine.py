@@ -201,6 +201,19 @@ class LLMEngine:
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         use_cached_outputs: bool = False,
     ) -> None:
+        """LLM Engine 初始化
+
+        Args:
+            vllm_config: vLLM配置对象，包含模型、缓存、并行等所有配置
+            executor_class: 执行器类，用于管理分布式执行
+            log_stats: 是否记录统计信息
+            usage_context: 使用的上下文，用于收集使用信息
+            stat_loggers: 统计日志记录器字典
+            mm_registry: 多模态注册表，默认使用全局注册表
+            use_cached_outputs: 是否使用缓存输出
+        """
+        # Step1 引擎检查与配置赋值
+        # 1. 引擎版本检查
         if envs.VLLM_USE_V1:
             raise ValueError(
                 "Using V0 LLMEngine, but envs.VLLM_USE_V1=True. "
@@ -208,6 +221,7 @@ class LLMEngine:
                 "LLMEngine.from_vllm_config(...) or explicitly set "
                 "VLLM_USE_V1=0 or 1 and report this issue on Github.")
 
+        # 2. 配置赋值
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -233,15 +247,19 @@ class LLMEngine:
         self.log_stats = log_stats
         self.use_cached_outputs = use_cached_outputs
 
+        # Step2 分词器初始化
+        # 1. 如果配置跳过分词器初始化, 则设置为 None
         if self.model_config.skip_tokenizer_init:
             self.tokenizer = None
             self.detokenizer = None
             tokenizer_group = None
+        # 2. 否则初始化分词器
         else:
             self.tokenizer = self._init_tokenizer()
             self.detokenizer = Detokenizer(self.tokenizer)
             tokenizer_group = self.get_tokenizer_group()
 
+        # 3. 序列分词器获取函数
         # Ensure that the function doesn't contain a reference to self,
         # to avoid engine GC issues
         def get_tokenizer_for_seq(sequence: Sequence) -> AnyTokenizer:
@@ -249,19 +267,23 @@ class LLMEngine:
                                      "make sure skip_tokenizer_init is False")
             return tokenizer_group.get_lora_tokenizer(sequence.lora_request)
 
+        # Step3 核心组建初始化
+        # 1. 序列计数器
         self.seq_counter = Counter()
+        # 2. 获取 generate config field
         self.generation_config_fields = (
             self.model_config.try_get_generation_config())
-
+        # 3. 输入预处理
         self.input_preprocessor = InputPreprocessor(self.model_config,
                                                     self.tokenizer,
                                                     mm_registry)
-
+        # 4. 模型执行器
         self.model_executor = executor_class(vllm_config=vllm_config)
-
+        # 5. 初始化 KV缓存 (如果不是 pooling 类型)
         if self.model_config.runner_type != "pooling":
             self._initialize_kv_caches()
 
+        # Step4 使用统计信息收集: 如果启用了使用统计, 收集并报告相关配置信息
         # If usage stat is enabled, collect relevant info.
         if is_usage_stats_enabled():
             from vllm.model_executor.model_loader import (
@@ -297,17 +319,24 @@ class LLMEngine:
                     self.parallel_config.disable_custom_all_reduce,
                 })
 
+        # Step5 调度器相关初始化
+        # 这里根据流水线并行配置创建多个 SchedulerOutputState 和 SchedulerContext
+        # vLLM 支持流水线并行, 将模型的不同层分配到不同的设备上, 每个流水线阶段需要独立的状态管理, 每个流水线阶段可视为一个虚拟引擎
+        # SchedulerOutputState: 缓存每个虚拟引擎的调度器输出状态，用于多步推理
+        # SchedulerContext: 管理每个虚拟引擎的输出队列和请求输出
+        # 1. 缓存的调度器输出状态
         self.cached_scheduler_outputs = [
             SchedulerOutputState()
             for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
-
+        # 2. 调度器上下文
         self.scheduler_contexts = [
             SchedulerContext(multi_step_stream_outputs=self.scheduler_config.
                              multi_step_stream_outputs)
             for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
 
+        # Step6 异步输出处理回调
         if self.model_config.use_async_output_proc:
             process_model_outputs = weak_bind(self._process_model_outputs)
 
@@ -319,18 +348,22 @@ class LLMEngine:
         else:
             self.async_callbacks = []
 
+        # 请求输出回调: 用于AsyncLLMEngine快速将请求输出添加到asyncio队列
         # Currently used by AsyncLLMEngine to ensure quick append
         # of request outputs to asyncio queues
         self.process_request_outputs_callback: Optional[Callable] = None
 
+        # Step7 调度器创建
         # Create the scheduler.
         # NOTE: the cache_config here have been updated with the numbers of
         # GPU and CPU blocks, which are profiled in the distributed executor.
+        # 1. 根据配置解析调度器类
         if isinstance(self.vllm_config.scheduler_config.scheduler_cls, str):
             Scheduler = resolve_obj_by_qualname(
                 self.vllm_config.scheduler_config.scheduler_cls)
         else:
             Scheduler = self.vllm_config.scheduler_config.scheduler_cls
+        # 2. 为每个 pipeline 并行实例创建调度器
         self.scheduler = [
             Scheduler(
                 self.scheduler_config, self.cache_config, self.lora_config,
@@ -340,6 +373,7 @@ class LLMEngine:
             for v_id in range(self.parallel_config.pipeline_parallel_size)
         ]
 
+        # Step8 统计日至记录器: 如果启用了日至记录, 初始化各种统计日志记录器
         # Metric Logging.
         if self.log_stats:
             if stat_loggers is not None:
@@ -367,12 +401,14 @@ class LLMEngine:
                 self.stat_loggers["prometheus"].info("cache_config",
                                                      self.cache_config)
 
+        # Step9 追踪器初始化: 如果配置了 OTLP 配置, 初始化追踪器
         self.tracer = None
         if self.observability_config.otlp_traces_endpoint:
             self.tracer = init_tracer(
                 "vllm.llm_engine",
                 self.observability_config.otlp_traces_endpoint)
 
+        # Step10 输出处理器创建: 创建序列组输出处理器，用于处理beam search或推测解码等
         # Create sequence output processor, e.g. for beam search or
         # speculative decoding.
         self.output_processor = (
@@ -386,12 +422,15 @@ class LLMEngine:
                                          get_tokenizer_for_seq),
             ))
 
+        # Step11 输入序列组初始化
         self.seq_id_to_seq_group: Dict[str, SequenceGroupBase] = {}
 
+        # Step12 跳过调度下一个步骤的标志
         # Flag to set when an input fails to process and the engine should run
         # the next step without re-scheduling.
         self._skip_scheduling_next_step = False
 
+        # Step13 重置多模态缓存
         # Don't keep the dummy data in memory
         self.reset_mm_cache()
 
@@ -401,10 +440,16 @@ class LLMEngine:
         The workers will determine the number of blocks in both the GPU cache
         and the swap CPU cache.
         """
+        """初始化 worker(s) 中的 KV cache
+        
+        worker 将会决定 GPU 和 swap CPU 中的 blocks 数量
+        """
         start = time.time()
+        # 1. 获取可能的 GPU 和 CPU blocks 数量
         num_gpu_blocks, num_cpu_blocks = (
             self.model_executor.determine_num_available_blocks())
 
+        # 2. 如果指定了 GPU 和 CPU blocks 数量, 则使用指定的数量
         if self.cache_config.num_gpu_blocks_override is not None:
             num_gpu_blocks_override = self.cache_config.num_gpu_blocks_override
             logger.info(
@@ -413,10 +458,13 @@ class LLMEngine:
                 num_gpu_blocks_override)
             num_gpu_blocks = num_gpu_blocks_override
 
+        # 3. 更新配置参数
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
+        # 4. 执行 cache 初始化
         self.model_executor.initialize_cache(num_gpu_blocks, num_cpu_blocks)
+
         elapsed = time.time() - start
         logger.info(("init engine (profile, create kv cache, "
                      "warmup model) took %.2f seconds"), elapsed)
@@ -424,20 +472,26 @@ class LLMEngine:
     @classmethod
     def _get_executor_cls(cls,
                           engine_config: VllmConfig) -> Type[ExecutorBase]:
+        """根据引擎配置确定并返回当前的 Executor 类, 如果未指定, 默认是 MP"""
         # distributed_executor_backend must be set in VllmConfig.__post_init__
+        # Step1 获取配置参数
         distributed_executor_backend = (
             engine_config.parallel_config.distributed_executor_backend)
         # Initialize the cluster and specify the executor class.
+        # Step2 判断执行器类型
+        # 1. 是否是自定义执行器
         if isinstance(distributed_executor_backend, type):
             if not issubclass(distributed_executor_backend, ExecutorBase):
                 raise TypeError(
                     "distributed_executor_backend must be a subclass of "
                     f"ExecutorBase. Got {distributed_executor_backend}.")
             executor_class = distributed_executor_backend
+        # 2. 是否是 Ray 分布式执行器
         elif distributed_executor_backend == "ray":
             from vllm.executor.ray_distributed_executor import (
                 RayDistributedExecutor)
             executor_class = RayDistributedExecutor
+        # 3. 是否是 MP 分布式执行器
         elif distributed_executor_backend == "mp":
             from vllm.executor.mp_distributed_executor import (
                 MultiprocessingDistributedExecutor)
@@ -445,15 +499,18 @@ class LLMEngine:
                 "multiprocessing distributed executor backend does not "
                 "support VLLM_USE_RAY_SPMD_WORKER=1")
             executor_class = MultiprocessingDistributedExecutor
+        # 4. 是否是 uni 执行器
         elif distributed_executor_backend == "uni":
             # JAX-style, single-process, multi-device executor.
             from vllm.executor.uniproc_executor import UniProcExecutor
             executor_class = UniProcExecutor
+        # 5. 是否是外部启动器执行器
         elif distributed_executor_backend == "external_launcher":
             # executor with external launcher
             from vllm.executor.uniproc_executor import (  # noqa
                 ExecutorWithExternalLauncher)
             executor_class = ExecutorWithExternalLauncher
+        # 6. 都不是, 抛出异常
         else:
             raise ValueError("unrecognized distributed_executor_backend: "
                              f"{distributed_executor_backend}")
@@ -558,6 +615,23 @@ class LLMEngine:
         """Add a processed request to the engine's request pool.
         return the created sequence group.
         """
+        """向 engine 的 request pool 添加一个的请求。返回创建的 sequence group。
+
+        Args:
+            request_id: 请求的唯一ID
+            porcessed_inputs: 经过 tokenizer 处理后的输入
+            params: 采样参数
+            arrival_time: 请求到达时间
+            lora_request: The LoRA parameters.
+            trace_headers: The trace headers.
+            priority: 请求的优先级
+
+        Returns:
+            The created sequence group. 创建的 Sequence Group
+        """
+        # Step1 并行采样处理
+        # 当采样参数中的 n > 1 时（即需要生成多个样本），使用 ParallelSampleSequenceGroup 来处理并行采样请求
+        # 这种情况下直接返回 None，不继续执行后续代码
         if isinstance(params, SamplingParams) and params.n > 1:
             ParallelSampleSequenceGroup.add_request(
                 request_id,
@@ -571,20 +645,26 @@ class LLMEngine:
             )
             return None
 
+        # Step2 输入验证
         self._validate_model_inputs(processed_inputs, lora_request)
+
+        # Step3 创建 Sequence
         # Create the sequences.
+        # 每个 block 存储的 token 数
         block_size = self.cache_config.block_size
+        # 序列 ID
         seq_id = next(self.seq_counter)
         eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
 
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
-
+        # 创建 Decoder Sequence 对象
         seq = Sequence(seq_id, decoder_inputs, block_size, eos_token_id,
                        lora_request)
-
+        # 创建 Encoder Sequence 对象 (如果需求)
         encoder_seq = (None if encoder_inputs is None else Sequence(
             seq_id, encoder_inputs, block_size, eos_token_id, lora_request))
 
+        # Step4 创建 SequenceGroup
         # Create a SequenceGroup based on SamplingParams or PoolingParams
         if isinstance(params, SamplingParams):
             seq_group = self._create_sequence_group_with_sampling(
@@ -609,12 +689,17 @@ class LLMEngine:
             raise ValueError(
                 "Either SamplingParams or PoolingParams must be provided.")
 
+        # Step5 将 SequenceGroup 添加至任务最少的 Scheduler
+        # Add the sequence group to the scheduler with least unfinished seqs.
+        # 5.1 计算每个 Scheduler 中未完成的 SequenceGroup 数量
         # Add the sequence group to the scheduler with least unfinished seqs.
         costs = [
             scheduler.get_num_unfinished_seq_groups()
             for scheduler in self.scheduler
         ]
+        # 5.2 获取未完成的 SequenceGroup 数量最小的 Scheduler
         min_cost_scheduler = self.scheduler[costs.index(min(costs))]
+        # 5.3 将 SequenceGroup 添加至 Scheduler
         min_cost_scheduler.add_seq_group(seq_group)
 
         return seq_group
@@ -679,39 +764,61 @@ class LLMEngine:
             >>> # continue the request processing
             >>> ...
         """
+        """
+        向 engine 的 request pool 添加一个请求
+        
+        请求会被添加到 request pool 中，并且在调用 engine.step() 时由调度器进行处理。具体的调度策略由调度器决定。
+        
+        Details:
+            - 如果 arrival_time 为 None，则将其设置为当前时间
+            - 如果 prompt_token_ids 为 None，则将其设置为编码后的提示（prompt）
+            - 创建 n 个 [Sequence][vllm.Sequence] 对象
+            - 使用这些 [Sequence][vllm.Sequence] 对象创建一个 [SequenceGroup][vllm.SequenceGroup] 对象
+            - 将该 [SequenceGroup][vllm.SequenceGroup] 对象添加到调度器中
+        """
+        # Step1 参数检查与预处理
+        # 检查 request_id
         if not isinstance(request_id, str):
             raise TypeError(
                 f"request_id must be a string, got {type(request_id)}")
 
+        # LoRA 配置检查
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
 
+        # 优先级检查
         if priority != 0 and not self.scheduler_config.policy == "priority":
             raise ValueError(f"Got priority {priority} but "
                              "Priority scheduling is not enabled.")
 
+        # 多步解码兼容性检查: 在多步解码模式下，不支持 logits 处理器
         if isinstance(params, SamplingParams) \
             and params.logits_processors \
             and self.scheduler_config.num_scheduler_steps > 1:
             raise ValueError(
                 "Logits processors are not supported in multi-step decoding")
 
+        # 到达时间设置
         if arrival_time is None:
             arrival_time = time.time()
 
+        # Step2 提示嵌入处理
+        # 1. 如果 prompt 是字典，且包含 prompt_embeds，则将 prompt_token_ids 设置为 prompt_embeds 的长度
         if (isinstance(prompt, dict)
                 and prompt.get("prompt_embeds", None) is not None
                 and not prompt.get("prompt_token_ids", None)):
             seq_len = prompt["prompt_embeds"].shape[0]
             prompt["prompt_token_ids"] = [0] * seq_len
 
+        # 2. 对 prompt 进行预处理
         processed_inputs = self.input_preprocessor.preprocess(
             prompt,
             tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
         )
 
+        # Step3 调用内部方法添加请求
         self._add_processed_request(
             request_id=request_id,
             processed_inputs=processed_inputs,

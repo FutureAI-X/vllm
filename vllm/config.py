@@ -2344,6 +2344,23 @@ class ParallelConfig:
     keep processing on a single host. Otherwise, this will default
     to "ray" if Ray is installed and fail otherwise. Note that tpu
     only support Ray for distributed inference."""
+    """
+        分布式执行后端, 决定了 vLLM 在分布式环境中使用哪种后端来执行模型推理
+        ray: 使用 Ray 作为分布式执行后端
+            - 适用于跨多个节点的分布式推理
+            - 需要安装 Ray 库
+            - 支持 TPU 分布式推理
+        mp: 使用 multiprocessing（多进程）作为执行后端
+            - 适用于单机多GPU场景
+            - 当管道并行和张量并行的乘积小于等于可用GPU数量时使用
+            - 不需要额外依赖
+        uni: 单进程多设备执行器
+            - JAX风格的执行器
+            - 在单个进程中使用多个设备
+        external_launcher: 外部启动器执行器
+            - 使用外部启动器来管理分布式执行
+        自定义 ExecutorBase 类型: 可以传入自定义的执行器类
+    """
 
     worker_cls: str = "auto"
     """The full name of the worker class to use. If "auto", the worker class

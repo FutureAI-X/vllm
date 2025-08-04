@@ -589,6 +589,7 @@ class LLM:
             considered legacy and may be deprecated in the future. You should
             instead pass them via the `inputs` parameter.
         """
+        # Step1 验证模型运行模式是否为 generate 模式
         model_config = self.llm_engine.model_config
         runner_type = model_config.runner_type
         if runner_type != "generate":
@@ -597,19 +598,24 @@ class LLM:
                 "Try passing `--runner generate` to use the model as a "
                 "generative model.")
 
+        # Step2 处理和解析 prompts
+        # 2.1 当提供了 prompt_token_ids 时，说明使用的是旧的 API 格式，需要进行转换
         if prompt_token_ids is not None:
             parsed_prompts = self._convert_v1_inputs(
                 prompts=cast(Optional[Union[str, list[str]]], prompts),
                 prompt_token_ids=prompt_token_ids,
             )
+        # 2.2 当没有提供 prompt_token_ids 时，说明使用新的 API，直接进行类型转换
         else:
             parsed_prompts = cast(Union[PromptType, Sequence[PromptType]],
                                   prompts)
 
+        # Step3 采样参数，如果为None，则使用默认参数
         if sampling_params is None:
             # Use default sampling params.
             sampling_params = self.get_default_sampling_params()
 
+        # Step5 '截断参数' 处理（可暂时忽略）
         tokenization_kwargs: dict[str, Any] = {}
         truncate_prompt_tokens = None
         if isinstance(sampling_params, SamplingParams):
@@ -618,10 +624,12 @@ class LLM:
         _validate_truncation_size(model_config.max_model_len,
                                   truncate_prompt_tokens, tokenization_kwargs)
 
+        # Step6 LoRA 相关处理
         # Add any modality specific loras to the corresponding prompts
         lora_request = self._get_modality_specific_lora_reqs(
             parsed_prompts, lora_request)
 
+        # Step7 校验并添加请求（将请求添加至 enginer 的 scheduler 中）
         self._validate_and_add_requests(
             prompts=parsed_prompts,
             params=sampling_params,
@@ -631,7 +639,9 @@ class LLM:
             priority=priority,
         )
 
+        # Step8 运行引擎
         outputs = self._run_engine(use_tqdm=use_tqdm)
+        # Step9 验证输出
         return self.engine_class.validate_outputs(outputs, RequestOutput)
 
     def _get_modality_specific_lora_reqs(
@@ -1761,10 +1771,22 @@ class LLM:
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         priority: Optional[list[int]] = None,
     ) -> None:
+        """验证输入参数并添加请求到引擎
+
+        Args:
+            prompts: 输入的提示，可以是数组
+            params: 采样参数
+            use_tqdm: 是否使用进度条
+            lora_request: LoRA请求
+            tokenization_kwargs: 分词器相关参数
+            priority: 请求的优先级
+        """
+        # Step1 输入标准化: 将单个 prompt 转换为列表格式
         if isinstance(prompts, (str, dict)):
             # Convert a single prompt to a list.
             prompts = [prompts]
 
+        # Step2 参数长度验证: 检查 params 和 lora_request 序列长度是否与 prompts 长度一致
         num_requests = len(prompts)
         if isinstance(params, Sequence) and len(params) != num_requests:
             raise ValueError("The lengths of prompts and params "
@@ -1774,17 +1796,20 @@ class LLM:
             raise ValueError("The lengths of prompts and lora_request "
                              "must be the same.")
 
+        # Step3 采样参数处理
         for sp in params if isinstance(params, Sequence) else (params, ):
             if isinstance(sp, SamplingParams):
                 # We only care about the final output
                 sp.output_kind = RequestOutputKind.FINAL_ONLY
 
+        # Step4 tqdm 打印处理
         # Add requests to the engine.
         it = prompts
         if use_tqdm:
             tqdm_func = use_tqdm if callable(use_tqdm) else tqdm
             it = tqdm_func(it, desc="Adding requests")
 
+        # Step6 向 engine 添加请求, 优先级数字越小越优先
         for i, prompt in enumerate(it):
             self._add_request(
                 prompt,
@@ -1803,7 +1828,10 @@ class LLM:
         lora_request: Optional[LoRARequest] = None,
         priority: int = 0,
     ) -> None:
+        """添加请求"""
+        # Step1 生成 request_id: 使用内部计数器生成唯一的 request_id
         request_id = str(next(self.request_counter))
+        # Step2 调用 LLM Engine 的 add_request 方法
         self.llm_engine.add_request(
             request_id,
             prompt,
