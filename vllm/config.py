@@ -2619,27 +2619,43 @@ class SchedulerConfig:
 
     runner_type: RunnerType = "generate"
     """The runner type to launch for the model."""
+    """指定要启动的模型运行器类型，可选值包括 "generate"（生成模式）、"pooling"（池化模式）和 "draft"（草稿模式）"""
 
     max_num_batched_tokens: SkipValidation[int] = None  # type: ignore
     """Maximum number of tokens to be processed in a single iteration.
 
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
+    """
+        单次迭代中可处理的最大 token 数量
+        如果用户未指定，将在 EngineArgs.create_engine_config 中根据使用上下文设置
+    """
 
     max_num_seqs: SkipValidation[int] = None  # type: ignore
     """Maximum number of sequences to be processed in a single iteration.
 
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
+    """
+        单次迭代中可处理的最大序列数量
+        如果用户未指定，将在 EngineArgs.create_engine_config 中根据使用上下文设置
+    """
 
     max_model_len: SkipValidation[int] = None  # type: ignore
     """Maximum length of a sequence (including prompt and generated text). This
     is primarily set in `ModelConfig` and that value should be manually
     duplicated here."""
+    """
+        序列的最大长度（包括提示和生成的文本）
+        主要在 ModelConfig 中设置，此处需要手动复制该值
+    """
 
     max_num_partial_prefills: int = 1
     """For chunked prefill, the maximum number of sequences that can be
     partially prefilled concurrently."""
+    """
+        在分块预填充(chunked prefill)中，可以同时部分预填充的最大序列数
+    """
 
     max_long_partial_prefills: int = 1
     """For chunked prefill, the maximum number of prompts longer than
@@ -2650,6 +2666,7 @@ class SchedulerConfig:
     long_prefill_token_threshold: int = 0
     """For chunked prefill, a request is considered long if the prompt is
     longer than this number of tokens."""
+    """在分块预填充中，如果提示超过此 token 数，则被认为是长提示"""
 
     num_lookahead_slots: int = 0
     """The number of slots to allocate per sequence per
@@ -2659,6 +2676,11 @@ class SchedulerConfig:
 
     NOTE: This will be replaced by speculative config in the future; it is
     present to enable correctness tests until then."""
+    """
+        每个序列每步分配的超出已知 token ID 的槽数
+        主要用于推测解码(speculative decoding)中存储可能被接受或拒绝的 token 的 KV 激活值
+        注意：将来会被推测配置(speculative config)替代
+    """
 
     cuda_graph_sizes: list[int] = field(default_factory=list)
     """Cuda graph capture sizes
@@ -2667,17 +2689,24 @@ class SchedulerConfig:
     pattern: [1, 2, 4] + [i for i in range(8, cuda_graph_sizes + 1, 8)]
     3. more than one value (e.g. 1 2 128) is provided, then the capture list
     will follow the provided list."""
+    """CUDA 图大小"""
 
     delay_factor: float = 0.0
     """Apply a delay (of delay factor multiplied by previous
     prompt latency) before scheduling next prompt."""
+    """在调度下一个提示之前应用延迟（延迟因子乘以上一个提示的延迟）"""
 
     enable_chunked_prefill: SkipValidation[bool] = None  # type: ignore
     """If True, prefill requests can be chunked based
     on the remaining max_num_batched_tokens."""
+    """
+        如果为 True，可以根据剩余的 max_num_batched_tokens 对预填充请求进行分块
+        如果用户未指定，将在 EngineArgs.create_engine_config 中根据使用上下文设置
+    """
 
     is_multimodal_model: bool = False
     """True if the model is multimodal."""
+    """如果模型是多模态模型则为 True"""
 
     # TODO (ywang96): Make this configurable.
     max_num_encoder_input_tokens: int = field(init=False)
@@ -2685,6 +2714,10 @@ class SchedulerConfig:
 
     NOTE: This is not currently configurable. It will be overridden by
     max_num_batched_tokens in case max multimodal embedding size is larger."""
+    """
+        多模态编码器计算预算，仅在 V1 中使用
+        目前不可配置，如果最大多模态嵌入大小较大，将被 max_num_batched_tokens 覆盖
+    """
 
     # TODO (ywang96): Make this configurable.
     encoder_cache_size: int = field(init=False)
@@ -2692,6 +2725,10 @@ class SchedulerConfig:
 
     NOTE: This is not currently configurable. It will be overridden by
     max_num_batched_tokens in case max multimodal embedding size is larger."""
+    """
+        多模态编码器缓存大小，仅在 V1 中使用
+        目前不可配置，如果最大多模态嵌入大小较大，将被 max_num_batched_tokens 覆盖
+    """
 
     preemption_mode: Optional[PreemptionMode] = None
     """Whether to perform preemption by swapping or
@@ -2700,18 +2737,30 @@ class SchedulerConfig:
     swapping. However, when the sequence group has multiple sequences
     (e.g., beam search), recomputation is not currently supported. In
     such a case, we use swapping instead."""
+    """
+        指定通过交换(swapping)还是重新计算(recomputation)进行抢占
+        如果未指定，系统按以下方式确定模式：
+            默认使用重新计算，因为它比交换产生更低的开销
+            但是，当序列组有多个序列（如束搜索）时，目前不支持重新计算，此时使用交换
+    """
 
     num_scheduler_steps: int = 1
     """Maximum number of forward steps per scheduler call."""
+    """每次调度器调用的最大前进步数"""
 
     multi_step_stream_outputs: bool = True
     """If False, then multi-step will stream outputs at the end of all steps"""
+    """如果为 False，则多步模式将在所有步骤结束后流式输出结果"""
 
     send_delta_data: bool = False
     """Private API. If used, scheduler sends delta data to
     workers instead of an entire data. It should be enabled only
     when SPMD worker architecture is enabled. I.e.,
     VLLM_USE_RAY_SPMD_WORKER=1"""
+    """
+        私有 API。如果使用，调度器将向 worker 节点发送增量数据而不是完整数据
+        仅在启用 SPMD 工作节点架构时启用（即 VLLM_USE_RAY_SPMD_WORKER=1）
+    """
 
     policy: SchedulerPolicy = "fcfs"
     """The scheduling policy to use:\n
@@ -2719,9 +2768,15 @@ class SchedulerConfig:
     of arrival.\n
     - "priority" means requests are handled based on given priority (lower
     value means earlier handling) and time of arrival deciding any ties)."""
+    """
+        使用的调度策略：
+        fcfs：先到先服务，即按请求到达顺序处理
+        priority：基于给定优先级处理请求（值越小处理越早），并以到达时间决定平局）
+    """
 
     chunked_prefill_enabled: bool = field(init=False)
     """True if chunked prefill is enabled."""
+    """如果启用分块预填充则为 True"""
 
     disable_chunked_mm_input: bool = False
     """If set to true and chunked prefill is enabled, we do not want to
@@ -2730,6 +2785,10 @@ class SchedulerConfig:
     (like text tokens TTTT followed by image tokens IIIIIIIIII) where only
     some image tokens can be scheduled (like TTTTIIIII, leaving IIIII),
     it will be scheduled as TTTT in one step and IIIIIIIIII in the next."""
+    """
+        如果设置为 true 且启用了分块预填充，则不希望部分调度多模态项目，仅在 V1 中使用
+        确保如果请求有混合提示（如文本令牌 TTTT 后跟图像令牌 IIIIIIIIII），其中只有部分图像令牌可以被调度（如 TTTTIIIII，留下 IIIII），它将在一步中调度 TTTT，在下一步中调度 IIIIIIIIII
+    """
 
     # scheduler class or path. "vllm.core.scheduler.Scheduler" (default)
     # or "mod.custom_class".
@@ -2737,11 +2796,19 @@ class SchedulerConfig:
     """The scheduler class to use. "vllm.core.scheduler.Scheduler" is the
     default scheduler. Can be a class directly or the path to a class of form
     "mod.custom_class"."""
+    """
+        要使用的调度器类
+        默认调度器是: vllm.core.scheduler.Scheduler
+        取值: 可以是类本身或形如 "mod.custom_class" 的类路径
+    """
 
     disable_hybrid_kv_cache_manager: bool = False
     """If set to True, KV cache manager will allocate the same size of KV cache
     for all attention layers even if there are multiple type of attention layers
     like full attention and sliding window attention.
+    """
+    """
+        如果设置为 True，KV 缓存管理器将为所有注意力层分配相同大小的 KV 缓存，即使存在多种类型的注意力层（如全注意力和滑动窗口注意力）
     """
 
     async_scheduling: bool = False
@@ -2749,6 +2816,11 @@ class SchedulerConfig:
     reduce the CPU overheads, leading to better latency and throughput. However,
     async scheduling is currently not supported with some features such as
     structured outputs, speculative decoding, and pipeline parallelism.
+    """
+    """
+        实验性功能：如果设置为 True，执行异步调度
+        这可能有助于减少 CPU 开销，从而获得更好的延迟和吞吐量
+        但异步调度目前不支持某些功能，如结构化输出、推测解码和流水线并行
     """
 
     def compute_hash(self) -> str:
