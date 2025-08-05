@@ -409,7 +409,7 @@ class ModelConfig:
     """RoPE theta. Use with `rope_scaling`. In some cases, changing the RoPE
     theta improves the performance of the scaled model."""
     """RoPE theta, 以 rope_scaling 一起使用, 在某些情况下, 修改 RoPE theta 可以提高缩放模型的性能"""
-    
+
     tokenizer_revision: Optional[str] = None
     """The specific revision to use for the tokenizer on the Hugging Face Hub.
     It can be a branch name, a tag name, or a commit id. If unspecified, will
@@ -437,14 +437,14 @@ class ModelConfig:
     `None`, we assume the model weights are not quantized and use `dtype` to
     determine the data type of the weights."""
     """量化方法, 如果为 None, 则会检查模型配置文件中的 quantization_config 属性. 如果为 None, 则认为模型权重未量化, 并使用 dtype 来确定权重的数据类型"""
-    
+
     enforce_eager: bool = False
     """Whether to always use eager-mode PyTorch. If True, we will disable CUDA
     graph and always execute the model in eager mode. If False, we will use
     CUDA graph and eager execution in hybrid for maximal performance and
     flexibility."""
     """始终使用 eager-mode PyTorch. 如果为 True, 则将禁用 CUDA graph 并始终在 eager 模式下执行模型. 如果为 False, 则使用 CUDA graph 和 eager 模式执行混合, 以获得最佳性能和灵活性"""
-    
+
     max_seq_len_to_capture: int = 8192
     """Maximum sequence len covered by CUDA graphs. When a sequence has context
     length larger than this, we fall back to eager mode. Additionally for
@@ -455,7 +455,8 @@ class ModelConfig:
     max_logprobs: int = 20
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
-    OpenAI Chat Completions API."""
+    OpenAI Chat Completions API. -1 means no cap, i.e. all (output_length *
+    vocab_size) logprobs are allowed to be returned and it may cause OOM."""
     """返回的 logprobs 最大数量"""
 
     logprobs_mode: LogprobsMode = "raw_logprobs"
@@ -561,7 +562,7 @@ class ModelConfig:
     """If `True`, disable caching of the multi-modal preprocessor/mapper (not
     recommended)."""
     """如为 True，禁用多模态预处理器/映射器的缓存（不推荐）"""
-    
+
     override_neuron_config: dict[str, Any] = field(default_factory=dict)
     """Initialize non-default neuron config or override default neuron config
     that are specific to Neuron devices, this argument will be used to
@@ -1728,7 +1729,7 @@ class ModelConfig:
         """
         This method attempts to retrieve the non-default values of the
         generation config for this model.
-        
+
         The generation config can contain information about special tokens, as
         well as sampling parameters. Which is why this method exists separately
         to `get_diff_sampling_param`.
@@ -1999,7 +2000,7 @@ class CacheConfig:
     kv_cache_dtype is fp8. If `False`, the scales will be loaded from the model
     checkpoint if available. Otherwise, the scales will default to 1.0."""
     """当kv_cache_dtype为fp8时，是否启用动态计算k_scale和v_scale。如果为False，会从模型检查点加载 scales（如果可用），否则默认为1.0"""
-    
+
     cpu_kvcache_space_bytes: Optional[int] = None
     """(CPU backend only) CPU key-value cache space."""
     """（仅CPU后端）CPU键值缓存空间"""
@@ -2246,7 +2247,7 @@ class ParallelConfig:
     pipeline_parallel_size: int = 1
     """Number of pipeline parallel groups."""
     """流水线并行组的数量"""
-    
+
     tensor_parallel_size: int = 1
     """Number of tensor parallel groups."""
     """张量并行组的数量"""
@@ -2281,7 +2282,7 @@ class ParallelConfig:
     and when data_parallel_size > 0. Enables running an AsyncLLM
     and API server on a "per-node" basis where vLLM load balances
     between local data parallel ranks, but an external LB balances
-    between vLLM nodes/replicas. Set explicitly in conjunction with 
+    between vLLM nodes/replicas. Set explicitly in conjunction with
     --data-parallel-start-rank."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
@@ -3421,6 +3422,19 @@ class SpeculativeConfig:
                         raise ValueError(
                             f"num_speculative_tokens:{self.num_speculative_tokens}"
                             f" must be divisible by {n_predict=}")
+
+                if self.speculative_token_tree is None:
+                    # Generate chain of tokens.
+                    self.speculative_token_tree = str([
+                        (i + 1) * (0, )
+                        for i in range(self.num_speculative_tokens)
+                    ])
+                else:
+                    # Sort the token tree breadth-first.
+                    tree_choices = ast.literal_eval(
+                        self.speculative_token_tree)
+                    self.speculative_token_tree = str(
+                        sorted(tree_choices, key=lambda t: (len(t), t)))
 
                 self.draft_tensor_parallel_size = \
                     SpeculativeConfig._verify_and_get_draft_tp(
