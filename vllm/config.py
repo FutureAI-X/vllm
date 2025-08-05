@@ -15,7 +15,7 @@ from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import (MISSING, Field, asdict, field, fields, is_dataclass,
                          replace)
-from functools import cached_property
+from functools import cached_property, lru_cache
 from importlib.util import find_spec
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
                     Protocol, TypeVar, Union, cast, get_args)
@@ -1055,15 +1055,6 @@ class ModelConfig:
                 for k, v in base_config.items():
                     if getattr(pooler_config, k) is None:
                         setattr(pooler_config, k, v)
-
-            if self.is_matryoshka:
-                if pooler_config.normalize is None:
-                    pooler_config.normalize = True
-                elif not pooler_config.normalize:
-                    raise ValueError(
-                        "`normalize` must be enabled (set to True) "
-                        "for models that are compatible with "
-                        "Matryoshka Representation.")
 
             return pooler_config
 
@@ -3828,25 +3819,34 @@ class PoolerConfig:
     [`vllm.model_executor.layers.pooler.PoolingType`][].
     """
 
+    ## for embeddings models
     normalize: Optional[bool] = None
     """
-    Whether to normalize the pooled outputs. Usually, this should be set to
-    ``True`` for embedding outputs.
+    Whether to normalize the embeddings outputs. 
+    """
+    dimensions: Optional[int] = None
+    """
+    Reduce the dimensions of embeddings if model 
+    support matryoshka representation.
     """
 
+    ## for classification models
+    activation: Optional[bool] = None
+    """
+    Whether to apply activation function to the classification outputs. 
+    """
+
+    ## for reward models
     softmax: Optional[bool] = None
     """
-    Whether to apply softmax to the pooled outputs. Usually, this should be set
-    to ``True`` for classification outputs.
+    Whether to apply softmax to the reward outputs. 
     """
-
     step_tag_id: Optional[int] = None
     """
     If set, only the score corresponding to the ``step_tag_id`` in the
     generated sentence should be returned. Otherwise, the scores for all tokens
     are returned.
     """
-
     returned_token_ids: Optional[list[int]] = None
     """
     A list of indices for the vocabulary dimensions to be extracted,
@@ -5530,6 +5530,14 @@ def set_current_vllm_config(vllm_config: VllmConfig,
     finally:
         _current_vllm_config = old_vllm_config
         _current_prefix = old_prefix
+        # Clear the compilation config cache when context changes
+        get_cached_compilation_config.cache_clear()
+
+
+@lru_cache(maxsize=1)
+def get_cached_compilation_config():
+    """Cache config to avoid repeated calls to get_current_vllm_config()"""
+    return get_current_vllm_config().compilation_config
 
 
 def get_current_vllm_config() -> VllmConfig:
