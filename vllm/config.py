@@ -1642,7 +1642,20 @@ class ModelConfig:
 
     def get_layers_start_end_indices(
             self, parallel_config: "ParallelConfig") -> tuple[int, int]:
+        """计算在流水线并行设置中, 当前设备应该处理的模型层数范围
+
+        方法返回一个元组 (start, end)，表示：
+            start: 当前设备应该处理的第一层的索引（包含）
+            end: 当前设备应该处理的最后一层的索引（不包含）
+
+        例如，如果一个模型有12层，使用4个流水线阶段，那么：
+            阶段0: (0, 3) - 处理层0, 1, 2
+            阶段1: (3, 6) - 处理层3, 4, 5
+            阶段2: (6, 9) - 处理层6, 7, 8
+            阶段3: (9, 12) - 处理层9, 10, 11
+        """
         from vllm.distributed.utils import get_pp_indices
+        # Step1 获取模型总层数
         if (self.hf_text_config.model_type == "deepseek_mtp"
                 or self.hf_config.model_type == "mimo_mtp"
                 or self.hf_config.model_type == "glm4_moe_mtp"):
@@ -1651,9 +1664,12 @@ class ModelConfig:
         else:
             total_num_hidden_layers = getattr(self.hf_text_config,
                                               "num_hidden_layers", 0)
+        # Step2 流水线排名计算
         # the layout order is: DP x PP x TP
         pp_rank = (parallel_config.rank // parallel_config.tensor_parallel_size
                    ) % parallel_config.pipeline_parallel_size
+
+        # Step3 计算当前流水线阶段应该处理的层索引范围
         pp_size = parallel_config.pipeline_parallel_size
         start, end = get_pp_indices(total_num_hidden_layers, pp_rank, pp_size)
         return start, end
@@ -2028,10 +2044,10 @@ class CacheConfig:
     # Will be set after profiling.
     num_gpu_blocks: Optional[int] = field(default=None, init=False)
     """The number of blocks to allocate for GPU memory."""
-    """分配给GPU内存的块数量。在分析后设置。"""
+    """分配给GPU内存的块数量。在分析后设置。vllm.engine.llm_engine.LLMEngine._initialize_kv_caches"""
     num_cpu_blocks: Optional[int] = field(default=None, init=False)
     """The number of blocks to allocate for CPU memory."""
-    """分配给CPU内存的块数量。在分析后设置。"""
+    """分配给CPU内存的块数量。在分析后设置。vllm.engine.llm_engine.LLMEngine._initialize_kv_caches"""
 
     kv_sharing_fast_prefill: bool = False
     """This feature is work in progress and no prefill optimization takes place

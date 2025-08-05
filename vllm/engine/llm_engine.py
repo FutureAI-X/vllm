@@ -454,7 +454,7 @@ class LLMEngine:
         num_gpu_blocks, num_cpu_blocks = (
             self.model_executor.determine_num_available_blocks())
 
-        # 2. 如果指定了 GPU 和 CPU blocks 数量, 则使用指定的数量
+        # 2. 如果指定了 GPU blocks 数量, 则使用指定的数量
         if self.cache_config.num_gpu_blocks_override is not None:
             num_gpu_blocks_override = self.cache_config.num_gpu_blocks_override
             logger.info(

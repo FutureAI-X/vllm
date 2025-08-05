@@ -21,6 +21,9 @@ class CacheEngine:
     caches. It also provides methods for performing KV cache operations, such
     as swapping and copying.
     """
+    """
+    管理 KV Cache, 负责初始化和管理 GPU 和 CPU 上的 KV Cache, 并提供缓存操作方法, 如交换和复制
+    """
 
     def __init__(
         self,
@@ -29,19 +32,30 @@ class CacheEngine:
         parallel_config: ParallelConfig,
         device_config: DeviceConfig,
     ) -> None:
+        # 配置信息
         self.cache_config = cache_config
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.device_config = device_config
 
+        # 每个注意力头的维度
         self.head_size = model_config.get_head_size()
+
+        # Attention Layer 信息
         # Models like Jamba, have mixed typed layers, E.g Mamba
         self.num_attention_layers = model_config.get_num_layers_by_block_type(
             parallel_config, LayerBlockType.attention)
+
+        # 注意力头数
         self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
 
+        # 每个 block 可以存储的 token 数
         self.block_size = cache_config.block_size
+
+        # GPU Block num
         self.num_gpu_blocks = cache_config.num_gpu_blocks
+
+        # 流水线并行情况下, 每个设备的 GPU Block num
         if self.num_gpu_blocks:
             self.num_gpu_blocks //= parallel_config.pipeline_parallel_size
         self.num_cpu_blocks = cache_config.num_cpu_blocks

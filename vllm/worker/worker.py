@@ -242,11 +242,25 @@ class Worker(LocalOrDistributedWorkerBase):
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
         """
+        """
+        分析模型峰值内存使用情况, 以确定可分配多少 KV 缓存块而不引发 OOM 错误
+        
+        引擎将首先对当前内存使用情况进行性能分析, 随后基于生于可用内存计算可分配的 GPU 和 CPU 块的最大可能数量
+        
+        Tip:
+            你可以通过调整 gpu_memory_utilization 来限制 GPU 内存的使用量
+            
+        Return:
+            num_gpu_blocks: 可以在GPU上分配的KV缓存块数量
+            num_cpu_blocks: 可以在CPU上分配的交换空间块数量
+        """
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
+        # 清空CUDA缓存，释放未使用的缓存内存
         torch.cuda.empty_cache()
+        # 重置CUDA内存统计信息，为后续的内存分析做准备
         torch.cuda.reset_peak_memory_stats()
-
+        # 获取当前GPU内存信息：空闲内存量和总内存量
         free_memory_pre_profile, total_gpu_memory = torch.cuda.mem_get_info()
 
         # Execute a forward pass with dummy inputs to profile the memory usage
@@ -256,21 +270,28 @@ class Worker(LocalOrDistributedWorkerBase):
                 weights_memory=self.model_runner.model_memory_usage) as result:
             self.model_runner.profile_run()
 
+        # 调用辅助方法验证内存使用量在分析过程中确实增加了，确保分析的有效性
         self._assert_memory_footprint_increased_during_profiling()
 
+        # 计算当前vLLM实例可使用的总内存：总GPU内存 × 内存利用率
         memory_for_current_instance = total_gpu_memory * \
             self.cache_config.gpu_memory_utilization
+        # 计算可用于KV缓存的内存：实例可用内存 - 非KV缓存内存使用量
         available_kv_cache_memory = (memory_for_current_instance -
                                      result.non_kv_cache_memory)
 
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
+        # 获取单个缓存块的大小（以字节为单位）
         cache_block_size = self.get_cache_block_size_bytes()
+        # 如果缓存块大小为0，则GPU和CPU块数都为0
         if cache_block_size == 0:
             num_gpu_blocks = 0
             num_cpu_blocks = 0
         else:
+            # 计算可分配的GPU块数（可用KV缓存内存//块大小）
             num_gpu_blocks = int(available_kv_cache_memory // cache_block_size)
+            # 计算可分配的CPU块数（交换空间字节数//块大小）
             num_cpu_blocks = int(self.cache_config.swap_space_bytes //
                                  cache_block_size)
         num_gpu_blocks = max(num_gpu_blocks, 0)
@@ -316,32 +337,56 @@ class Worker(LocalOrDistributedWorkerBase):
 
         This also warms up the model, which may record CUDA graphs.
         """
+        """
+        使用 gpu cpu block num 分配 GPU 和 CPU KV Cache
+        同时预热模型
+        """
+        # Step1 参数验证
+        # 验证缓存块数量是否合理，确保不会超出内存限制或违反注意力机制相关约束
         raise_if_cache_size_invalid(
             num_gpu_blocks, self.cache_config.block_size,
             self.cache_config.is_attention_free,
             self.model_config.max_model_len,
             self.parallel_config.pipeline_parallel_size)
 
+        # Step2 设置缓存配置
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
+        # Step3 内存池管理
+        """
+        内存池是一种预先分配一大块内存，然后从这块内存中分配和回收小块内存的技术。相比于频繁地向操作系统申请和释放内存，内存池可以：
+        减少内存碎片
+        提高内存分配效率
+        更好地控制内存使用
+        """
         if self.vllm_config.model_config.enable_sleep_mode:
+            # 如果启用了睡眠模式（enable_sleep_mode），则使用 CuMemAllocator 的内存池功能来管理 KV 缓存内存分配
             allocator = CuMemAllocator.get_instance()
             context = allocator.use_memory_pool(tag="kv_cache")
         else:
+            # 使用空上下文（nullcontext）不进行特殊内存管理
             from contextlib import nullcontext
             context = nullcontext()
+
+        # Step4 缓存引擎初始化
         with context:
             self._init_cache_engine()
+
+        # Step5 模型预测
+        # 对模型进行预热，包括编译指定尺寸的计算图和捕获 CUDA 图以提高性能
         self._warm_up_model()
 
     def _init_cache_engine(self):
+        # 确保已经设置了 GPU 块的数量，这是初始化缓存引擎的前提条件
         assert self.cache_config.num_gpu_blocks is not None
+        # 为每个 pipeline 并行阶段创建一个 CacheEngine 实例，用于管理 KV 缓存
         self.cache_engine = [
             CacheEngine(self.cache_config, self.model_config,
                         self.parallel_config, self.device_config)
             for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
+        # 从每个缓存引擎中提取 GPU 缓存引用，构建统一的 GPU 缓存访问接口
         self.gpu_cache = [
             self.cache_engine[ve].gpu_cache
             for ve in range(self.parallel_config.pipeline_parallel_size)
@@ -351,8 +396,10 @@ class Worker(LocalOrDistributedWorkerBase):
         # If an Attention layer `layer_name` is in the keys of this dict, it
         # means this layer will perform attention using the keys and values
         # from the KV cache of `shared_kv_cache_layers[layer_name]`.
+        # 初始化用于存储跨层 KV 共享配置的字典，键值对表示源层和目标层的映射关系
         shared_kv_cache_layers: dict[str, str] = {}
 
+        # 从模型配置中获取所有 Attention 层的引用
         attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
 
         for layer_name, attn_module in attn_layers.items():
@@ -367,6 +414,7 @@ class Worker(LocalOrDistributedWorkerBase):
                 # or enable more requests to be processed simultaneously.
                 shared_kv_cache_layers[layer_name] = kv_tgt_layer
 
+        # 将构建好的 GPU 缓存和共享配置绑定到编译配置的静态上下文中
         bind_kv_cache(self.compilation_config.static_forward_context,
                       self.gpu_cache, shared_kv_cache_layers)
 
