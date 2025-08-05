@@ -19,6 +19,7 @@ logger = init_logger(__name__)
 
 
 class UniProcExecutor(ExecutorBase):
+    """主要用于单进程环境下的模型推理"""
 
     uses_ray: bool = False
 

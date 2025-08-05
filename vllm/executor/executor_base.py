@@ -33,8 +33,15 @@ class ExecutorBase(ABC):
     or it can be a distributed executor 
     that can execute the model on multiple devices.
     """
+    """所有执行器的基类
+    1. 执行器负责在一个设备上执行模型
+    2. 分布式执行器可以在多个设备上执行模型
+    """
 
+    # 是否使用 Ray 进行编排
     uses_ray: bool  # whether the executor uses Ray for orchestration.
+
+    # 是否支持流水线并行（Pipeline Parallelism, PP）, 流水线并行是一种将模型按层分割到不同设备上的并行方式
     supports_pp: bool = False  # whether the executor supports PP
 
     def __init__(
@@ -87,6 +94,21 @@ class ExecutorBase(ABC):
             It is recommended to use this API to only pass control messages,
             and set up data-plane communication to pass data.
         """
+        """
+        在全部 workers 上执行一次 RPC 调用
+        
+        Args:
+            method: 要执行的 worker method
+            timeout: 等待执行完成的最长时间（秒）。如果超时，则会引发 [`TimeoutError`][]。`None` 表示无限等待
+            args: 传递给 worker method 的位置参数
+            kwargs: 传递给 worker method 的关键字参数
+            
+        Returns:
+            一个列表，包含每个 worker 返回的结果
+            
+        Note:
+            建议仅使用此API传递控制消息，并设置 data-plane communication 来传输数据
+        """
         raise NotImplementedError
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
@@ -102,14 +124,31 @@ class ExecutorBase(ABC):
         num_cpu_blocks refers to "swapped" blocks in CPU memory and cannot be
         appended to.
         """
+        """
+        确定 GPU KV cache 以及 swappable CPU KV cache 的可用 blocks 数量
+        
+        通常，此操作应直接委托给底层的 Worker。某些 ExecutorBase 可能需要对结果进行调整，
+        例如，确保所选择的缓存大小与所有工作节点兼容。
+        
+        Returns:
+            num_gpu_blocks  可用的 GPU blocks 数量
+            num_cpu_blocks  可用的 CPU blocks 数量
+        """
+        # Step1 所有 worker 返回的 list 集合
         results = self.collective_rpc("determine_num_available_blocks")
+
+        # Step2 获取所有 worker 中的最小值
         a = min([r[0] for r in results])
         b = min([r[1] for r in results])
+
+        # Step3 返回
         return a, b
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks) -> None:
         """Initialize the KV cache by invoking the underlying worker.
         """
+        """通过调用底层 Worker 来初始化 KV cache"""
+        # Step1 日志记录
         # NOTE: This is logged in the executor because there can be >1 workers.
         logger.info("# %s blocks: %d, # CPU blocks: %d",
                     vllm.platforms.current_platform.device_name,
@@ -119,9 +158,11 @@ class ExecutorBase(ABC):
         logger.info("Maximum concurrency for %s tokens per request: %.2fx",
                     self.model_config.max_model_len, max_concurrency)
 
+        # Step2 配置更新
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
+        # Step3 远程调用所有 worker 进行 KV cache 初始化
         self.collective_rpc("initialize_cache",
                             args=(num_gpu_blocks, num_cpu_blocks))
 
@@ -144,8 +185,12 @@ class ExecutorBase(ABC):
     def execute_model(
         self, execute_model_req: ExecuteModelRequest
     ) -> Optional[List[Union[SamplerOutput, PoolerOutput]]]:
+        """执行模型调用"""
+        # Step1 远程调用所有 worker 进行模型调用
         output = self.collective_rpc("execute_model",
                                      args=(execute_model_req, ))
+
+        # Step2 返回第一个 worker 的输出 (为什么是第1个worker?)
         return output[0]
 
     def stop_remote_worker_execution_loop(self) -> None:
@@ -255,10 +300,12 @@ class ExecutorBase(ABC):
 
 class DistributedExecutorBase(ExecutorBase):
     """Abstract superclass of distributed executor implementations."""
+    """分布式执行器的抽象父类"""
 
     def __init__(self, *args, **kwargs):
         # This is non-None when the execute model loop is running
         # in the parallel workers. It's a coroutine in the AsyncLLMEngine case.
+        # 在并行工作程序中运行时，此为非 None。当使用 AsyncLLMEngine 时，它是一个协程。
         self.parallel_worker_tasks: Optional[Union[Any, Awaitable[Any]]] = None
 
         super().__init__(*args, **kwargs)
@@ -267,14 +314,18 @@ class DistributedExecutorBase(ExecutorBase):
         self,
         execute_model_req: ExecuteModelRequest,
     ) -> List[SamplerOutput]:
+        # Step1 启动 worker execution loop
         # TODO: unify into collective_rpc
         if self.parallel_worker_tasks is None:
             self.parallel_worker_tasks = self._run_workers(
                 "start_worker_execution_loop",
                 async_run_tensor_parallel_workers_only=True)
 
+        # Step2 在 driver worker 节点运行 execute_model 方法
         # Only the driver worker returns the sampling results.
         driver_outputs = self._driver_execute_model(execute_model_req)
+
+        # Step3 校验执行结果并返回
         assert driver_outputs is not None
         return driver_outputs
 
@@ -298,6 +349,11 @@ class DistributedExecutorBase(ExecutorBase):
         Passing None will cause the driver to stop the model execution loop
         running in each of the remote workers. In this case, this method
         returns None. Otherwise, this method returns the model output.
+        """
+        """
+        在 driver worker 上执行 execute_model
+        
+        传递 None 将导致驱动程序停止在各个 remote worker 上运行的模型执行循环。在这种情况下，该方法返回 None。否则，该方法返回模型输出。
         """
         raise NotImplementedError
 
@@ -326,6 +382,13 @@ class DistributedExecutorBase(ExecutorBase):
                 rather than blocking on the results.
         
         # TODO: simplify and merge with collective_rpc
+        """
+        """
+        在所有的 workers 上执行给定的方法
+        
+        Args:
+            async_run_tensor_parallel_workers_only: 如果为 True, 则该方法将仅在远程的 TP workers 节点运行, 而不会在 driver worker
+                同时，该方法将以异步方式运行，返回一个 future 列表，而不会阻塞等待结果
         """
         raise NotImplementedError
 
