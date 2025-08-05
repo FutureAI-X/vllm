@@ -1251,6 +1251,21 @@ class ModelConfig:
         if quant_cfg is None:
             # compressed-tensors uses a "compression_config" key
             quant_cfg = getattr(self.hf_config, "compression_config", None)
+
+        else:
+            # Set quant_method for ModelOpt models.
+            producer_name = quant_cfg.get("producer", {}).get("name")
+            if producer_name == "modelopt":
+                quant_algo = quant_cfg.get("quantization",
+                                           {}).get("quant_algo")
+                if quant_algo == "FP8":
+                    quant_cfg["quant_method"] = "modelopt"
+                elif quant_algo == "NVFP4":
+                    quant_cfg["quant_method"] = "modelopt_fp4"
+                elif quant_algo is not None:
+                    raise ValueError(
+                        f"Unknown ModelOpt quant algo: {quant_algo}")
+
         return quant_cfg
 
     def _verify_quantization(self) -> None:
@@ -4750,12 +4765,20 @@ class CompilationConfig:
             "disabled_custom_ops": True,
             "compilation_time": True,
             "bs_to_padded_graph_size": True,
-            "pass_config": True,
             "traced_files": True,
             "inductor_compile_config": {
                 "post_grad_custom_post_pass": True,
             },
         }
+
+        # exclude default attr in pass_config
+        pass_config_exclude = {}
+        for attr, default_val in vars(PassConfig()).items():
+            if getattr(self.pass_config, attr) == default_val:
+                pass_config_exclude[attr] = True
+        if pass_config_exclude:
+            exclude["pass_config"] = pass_config_exclude
+
         # The cast to string is necessary because Pydantic is mocked in docs
         # builds and sphinx-argparse doesn't know the return type of decode()
         return str(
