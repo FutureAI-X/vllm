@@ -792,23 +792,39 @@ class LLM:
             lora_request: LoRA request to use for generation, if any.
             use_tqdm: Whether to use tqdm to display the progress bar.
         """
+        """使用束搜索（beam search）算法生成文本序列
+        
+        Args:
+            prompts: 提示列表，每个提示可以是 token ID 列表或文本提示
+            params: 束搜索参数
+            lora_request: 可选的 LoRA 请求
+            use_tqdm: 是否使用进度条显示进度，默认为 False
+        """
         # TODO: how does beam search work together with length penalty,
         # frequency, penalty, and stopping criteria, etc.?
+
+        # Step1 初始化准备
+        # 1. 从 BeamSearchParams 中 获取 Beam Search 关键参数, 方便后续使用
         beam_width = params.beam_width
         max_tokens = params.max_tokens
         temperature = params.temperature
         ignore_eos = params.ignore_eos
         length_penalty = params.length_penalty
 
+        # 2. 初始化 LoRA 请求
         lora_requests = self._get_beam_search_lora_requests(
             lora_request, prompts)
 
+        # 3. 获取 tokenizer
         tokenizer = self.get_tokenizer()
+
+        # 4. 创建用于排序 beams 的函数, 在后续使用
         sort_beams_key = create_sort_beams_key_function(
             tokenizer.eos_token_id,
             length_penalty,
         )
 
+        # 5. 定义一个辅助函数, 将 BeamSearchSequence 转换为 TokensPrompt, 用于后续的模型推理
         def create_tokens_prompt_from_beam(
                 beam: BeamSearchSequence) -> TokensPrompt:
             token_prompt_kwargs: TokensPrompt = {
@@ -822,15 +838,20 @@ class LLM:
                     "mm_processor_kwargs"] = beam.mm_processor_kwargs
             return TokensPrompt(**token_prompt_kwargs)
 
+        # 6. 创建用于束搜索的采样参数, 每次只生成一个 token, 但会返回 2 * beam_width 个候选 token 的 logprobs
         # generate 2 * beam_width candidates at each step
         # following the huggingface transformers implementation
         # at https://github.com/huggingface/transformers/blob/e15687fffe5c9d20598a19aeab721ae0a7580f8a/src/transformers/generation/beam_search.py#L534 # noqa
         beam_search_params = SamplingParams(logprobs=2 * beam_width,
                                             max_tokens=1,
                                             temperature=temperature)
-        instances: list[BeamSearchInstance] = []
 
+        # 7. 为每个 prompt 创建 BeamSearchInstance 对象，初始化束搜索实例。
+        # (1) 初始化束搜索实例
+        instances: list[BeamSearchInstance] = []
+        # (2) 处理每一个 prompt
         for lora_req, prompt in zip(lora_requests, prompts):
+            # 添加多模态相关参数
             # Add multimodal processor kwargs & data
             mm_kwargs = {}
             if "multi_modal_data" in prompt:
@@ -839,12 +860,14 @@ class LLM:
                 mm_kwargs["mm_processor_kwargs"] = prompt[
                     "mm_processor_kwargs"]
 
+            # 获取 prompt 的 token IDs
             if "prompt_token_ids" in prompt:
                 prompt = cast(TokensPrompt, prompt)  # Needed for mypy
                 prompt_tokens = prompt["prompt_token_ids"]
             else:
                 prompt_tokens = tokenizer.encode(prompt["prompt"])
 
+            # 向 instances 中增加数据
             instances.append(
                 BeamSearchInstance(
                     prompt_tokens,
@@ -853,7 +876,10 @@ class LLM:
                     **mm_kwargs,
                 ), )
 
+        # 8. 设置迭代器
         token_iter = range(max_tokens)
+
+        # 9. tqdm 进度条相关设置
         if use_tqdm:
             token_iter = tqdm(token_iter,
                               desc="Beam search",
@@ -864,23 +890,29 @@ class LLM:
                 "may finish early due to stopping conditions. It does not "
                 "reflect instance-level progress.")
 
+        # Step2 主循环
         for _ in token_iter:
+            # 1. 收集所有实例（instances）当前的 beams，形成一个扁平化的列表 all_beams。每个 instance 代表一个原始 prompt 的束搜索状态，而 instance.beams 是该 instance 当前维护的候选序列集合。
             all_beams: list[BeamSearchSequence] = list(
                 sum((instance.beams for instance in instances), []))
+            # 2. 计算每个 instance 在 all_beams 列表中的起始和结束位置索引。itertools.accumulate 用于计算累积和，pos 列表的第一个元素是 0，后面每个元素表示对应 instance 在 all_beams 中的起始位置。
             pos = [0] + list(
                 itertools.accumulate(
                     len(instance.beams) for instance in instances))
             instance_start_and_end: list[tuple[int, int]] = list(
                 zip(pos[:-1], pos[1:]))
 
+            # 3. 如果当前没有任何候选 beams（所有序列都已完成），则提前结束生成循环
             if len(all_beams) == 0:
                 break
 
+            # 4. 为所有当前 beams 创建批次输入
             # create the corresponding batch entries for prompt & optional lora
             prompts_batch, lora_req_batch = zip(
                 *[(create_tokens_prompt_from_beam(beam), beam.lora_request)
                   for beam in all_beams])
 
+            # 5. 执行一次前向传播
             # only runs for one step
             # we don't need to use tqdm here
             output = self.generate(prompts_batch,
@@ -888,9 +920,12 @@ class LLM:
                                    use_tqdm=False,
                                    lora_request=lora_req_batch)
 
+            # 6. 遍历每个 instance 及其在 all_beams 中对应的索引范围。每个 instance 对应一个 prompt
             for (start, end), instance in zip(instance_start_and_end,
                                               instances):
+                # 为当前 instance 初始化新的候选 beams 列表。
                 instance_new_beams = []
+                # 遍历当前 instance 对应的所有 beams，并获取相应的生成结果
                 for i in range(start, end):
                     current_beam = all_beams[i]
                     result = output[i]
@@ -921,6 +956,7 @@ class LLM:
                                       reverse=True)
                 instance.beams = sorted_beams[:beam_width]
 
+        # Step3 组装输出
         outputs = []
         for instance in instances:
             instance.completed.extend(instance.beams)

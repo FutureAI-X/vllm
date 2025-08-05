@@ -71,10 +71,21 @@ def get_beam_search_score(
 
     https://github.com/huggingface/transformers/blob/ccb92be23def445f2afdea94c31286f84b89eb5b/src/transformers/generation/beam_search.py#L938
     """
+    """计算 beam search 中序列得分的方法，包含长度惩罚机制
+    
+    Args:
+        tokens: list[int] - 序列的 token ID 列表
+        cumulative_logprob: float - 序列的累积对数概率
+        eos_token_id: int - 结束符（EOS）的 token ID
+        length_penalty: float = 1.0 - 长度惩罚因子，默认为 1.0（无惩罚）
+    """
+    # Step1 序列长度计算
     seq_len = len(tokens)
+    # 如果最后一个 token 是 EOS，则序列长度减 1
     if tokens[-1] == eos_token_id:
         seq_len -= 1
 
+    # Step2 长度惩罚应用
     return cumulative_logprob / (seq_len**length_penalty)
 
 

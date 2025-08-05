@@ -574,9 +574,20 @@ class BeamSearchParams(
         # required for @cached_property.
         dict=True):  # type: ignore[call-arg]
     """Beam search parameters for text generation."""
+    """
+    继承自 msgspec.Struct，这是一个用于高效序列化的结构化数据类
+        omit_defaults=True: 序列化时省略默认值
+        dict=True: 支持字典形式的访问
+    """
+    # beam 的宽度，即在每个时间步保留的候选序列数量
     beam_width: int
+    # 最大生成 token 数量
     max_tokens: int
+    # 是否忽略结束符（EOS），默认为 False，表示遇到 EOS 时停止生成
     ignore_eos: bool = False
+    # 温度参数，控制生成的随机性，0.0 表示贪婪搜索
     temperature: float = 0.0
+    # 长度惩罚因子，用于在不同长度的序列间进行平衡
     length_penalty: float = 1.0
+    # 是否在输出中包含停止字符串
     include_stop_str_in_output: bool = False
