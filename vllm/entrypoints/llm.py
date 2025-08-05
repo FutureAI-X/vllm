@@ -1846,6 +1846,10 @@ class LLM:
         *,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True
     ) -> list[Union[RequestOutput, PoolingRequestOutput]]:
+        """Run the engine. 此方法是执行 LLM 推理的核心循环。
+        它负责处理所有已添加到引擎中的请求，直到所有请求都完成，并返回最终的输出结果
+        """
+        # Step1 初始化 tqdm，用于显示处理进度和估计的处理速度
         # Initialize tqdm.
         if use_tqdm:
             num_requests = self.llm_engine.get_num_unfinished_requests()
@@ -1858,15 +1862,22 @@ class LLM:
                          f"output: {0:.2f} toks/s"),
             )
 
+        # Step2 运行引擎
         # Run the engine.
         outputs: list[Union[RequestOutput, PoolingRequestOutput]] = []
         total_in_toks = 0
         total_out_toks = 0
+        # 循环处理, 直至所有请求完成
         while self.llm_engine.has_unfinished_requests():
+            # 执行一次 step
             step_outputs = self.llm_engine.step()
+            # 处理 step 输出
             for output in step_outputs:
+                # 判断请求是否已完成
                 if output.finished:
+                    # 将输出添加到输出列表中
                     outputs.append(output)
+                    # 更新进度
                     if use_tqdm:
                         if isinstance(output, RequestOutput):
                             # Calculate tokens only for RequestOutput

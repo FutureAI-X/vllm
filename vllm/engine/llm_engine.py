@@ -90,15 +90,20 @@ class OutputData(NamedTuple):
 
 
 class SchedulerContext:
+    """此类是 vLLM 引擎中用于管理调度器输出上下文的辅助类"""
 
     def __init__(self, multi_step_stream_outputs: bool = False):
+        # 双端队列, 缓存模型输出
         self.output_queue: Deque[OutputData] = deque()
+        # 存储待处理的请求输出
         self.request_outputs: List[Union[RequestOutput,
                                          PoolingRequestOutput]] = []
+        # SequenceGroupMetadata
         self.seq_group_metadata_list: Optional[
             List[SequenceGroupMetadata]] = None
+        # 调度器输出
         self.scheduler_outputs: Optional[SchedulerOutputs] = None
-
+        # 是否为多步流输出
         self.multi_step_stream_outputs: bool = multi_step_stream_outputs
 
     def append_output(self, outputs: List[SamplerOutput],
@@ -1355,6 +1360,20 @@ class LLMEngine:
                 break
         ```
         """
+        """执行一次 decoding 迭代并返回新的生成结果
+        
+        细节:
+            1. 调度下一次迭代要执行的序列，以及需要 swapped in/out/copy 的 blocks
+             - 根据不同通过的调度策略，序列可能会被抢占或重新排序
+             - Sequence Group (SG) 指从同一 prompt 生成的一组序列
+            2. 调用分布式执行器执行模型
+            3. 处理模型的输出
+             - 解码相关输出
+             - 使用模型输出更新已调度的 Sequence Goups，基于其 `采样参数`（是否使用 beam search）
+             - 释放已完成的序列组
+            4. 创建并返回新生成的结果
+        """
+        # Step1 流水线并行参数检查
         if self.parallel_config.pipeline_parallel_size > 1:
             raise NotImplementedError(
                 "Pipeline parallelism is only supported through AsyncLLMEngine "
@@ -1362,20 +1381,34 @@ class LLMEngine:
 
         # For llm_engine, there is no pipeline parallel support, so the engine
         # used is always 0.
+        # 对于 llm_engine, 不支持流水线并行模式，因此使用的虚拟引擎 (Scheduler) 总是 0
         virtual_engine = 0
 
+        # Step2 获取上一轮 Scheduled 输出的缓存, 首次为 None
         # These are cached outputs from previous iterations. None if on first
         # iteration
+        # 从缓存中缓存之前迭代的输出, 如果为第一次迭代, 则为 None
         cached_outputs = self.cached_scheduler_outputs[virtual_engine]
+        # 获取缓存的上一轮迭代输出的 Sequence Group Metadata
         seq_group_metadata_list = cached_outputs.seq_group_metadata_list
+        # 获取缓存的上一轮迭代输出的 Scheduler Outputs
         scheduler_outputs = cached_outputs.scheduler_outputs
+        # 获取是否允许异步输出处理的标志
         allow_async_output_proc = cached_outputs.allow_async_output_proc
 
+        # Step3 获取 Schedule 上下文 对象
         ctx = self.scheduler_contexts[virtual_engine]
 
+        # 每次迭代开始时, 清空上一轮迭代的输出
         # Clear outputs for each new scheduler iteration
         ctx.request_outputs.clear()
 
+        # Step4 执行调度
+        """
+        以下情况将会跳过调度
+        1. Sequence Group 还有剩余步骤, 这保证仅在当前批次完成时才再次调用调度器
+        2. 如果单个请求导致上一个引擎步骤失败，并且需要重新运行上一个调度，则跳过调度器。
+        """
         # Skip the scheduler if there are any remaining steps in the seq groups.
         # This ensures that the scheduler is only called again when the current
         # batch has completed.
@@ -1385,13 +1418,16 @@ class LLMEngine:
                 seq_group_metadata_list
         ) and not self._skip_scheduling_next_step:
             # Schedule iteration
+            # 1. 触发一次 Schedule 的调度, 来决定哪些序列组将在下一步执行
             (seq_group_metadata_list, scheduler_outputs,
              allow_async_output_proc
              ) = self.scheduler[virtual_engine].schedule()
 
+            # 2. 更新上下文
             ctx.seq_group_metadata_list = seq_group_metadata_list
             ctx.scheduler_outputs = scheduler_outputs
 
+            # 3. 并清理以完成的请求
             finished_requests_ids = self.scheduler[
                 virtual_engine].get_and_reset_finished_requests_ids()
             # When n>1, elements in self.seq_id_to_seq_group should be deleted
@@ -1404,6 +1440,7 @@ class LLMEngine:
             if not allow_async_output_proc and len(ctx.output_queue) > 0:
                 self._process_model_outputs(ctx=ctx)
 
+            # 4. 如果启用了多步解码且有前瞻槽位，则缓存调度输出以供后续步骤使用
             if (self.scheduler_config.is_multi_step
                     and scheduler_outputs.num_lookahead_slots > 0):
                 # cache the scheduler outputs for the next iteration if we have
@@ -1417,6 +1454,7 @@ class LLMEngine:
         assert seq_group_metadata_list is not None
         assert scheduler_outputs is not None
 
+        # Step5 模型执行
         if not scheduler_outputs.is_empty():
 
             # Check if we have a cached last_output from the previous iteration.
@@ -1426,6 +1464,7 @@ class LLMEngine:
             last_sampled_token_ids = \
                 self._get_last_sampled_token_ids(virtual_engine)
 
+            # 创建模型执行请求
             execute_model_req = ExecuteModelRequest(
                 seq_group_metadata_list=seq_group_metadata_list,
                 blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
@@ -1438,15 +1477,18 @@ class LLMEngine:
                 # to each of the non-last PP stages for in-place prepare_input.
                 last_sampled_token_ids=last_sampled_token_ids)
 
+            # 设置异步回调
             if allow_async_output_proc:
                 execute_model_req.async_callback = self.async_callbacks[
                     virtual_engine]
 
             try:
+                # 调用模型执行器执行模型推理
                 outputs = self.model_executor.execute_model(
                     execute_model_req=execute_model_req)
                 self._skip_scheduling_next_step = False
             except InputProcessingError as e:
+                # 错误处理
                 # The input for this request cannot be processed, so we must
                 # abort it. If there are remaining requests in the batch that
                 # have been scheduled, they will be retried on the next step.
@@ -1462,6 +1504,7 @@ class LLMEngine:
 
             # We need to do this here so that last step's sampled_token_ids can
             # be passed to the next iteration for PP.
+            # 如果是多步解码，更新缓存的调度输出
             if self.scheduler_config.is_multi_step:
                 self._update_cached_scheduler_output(virtual_engine, outputs)
         else:
@@ -1472,7 +1515,9 @@ class LLMEngine:
             # No outputs in this case
             outputs = []
 
+        # Step6 输出处理
         # Finish the current step for all the sequence groups.
+        # 完成当前部署
         if self.scheduler_config.is_multi_step:
             for seq_group in seq_group_metadata_list:
                 seq_group.finish_step()
@@ -1489,6 +1534,7 @@ class LLMEngine:
                 else seq_group_metadata_list[0].state.num_steps == 1
 
             # Add results to the output_queue
+            # 添加到输出队列
             ctx.append_output(outputs=outputs,
                               seq_group_metadata_list=seq_group_metadata_list,
                               scheduler_outputs=scheduler_outputs,
@@ -1496,6 +1542,7 @@ class LLMEngine:
                               is_last_step=True,
                               is_first_step_output=is_first_step_output)
 
+            # 异步处理逻辑
             if outputs and allow_async_output_proc:
                 assert len(outputs) == 1, (
                     "Async postprocessor expects only a single output set")
@@ -1505,6 +1552,7 @@ class LLMEngine:
                     scheduler_outputs.scheduled_seq_groups)
 
             # Check if need to run the usual non-async path
+            # 同步处理逻辑
             if not allow_async_output_proc:
                 self._process_model_outputs(ctx=ctx)
 

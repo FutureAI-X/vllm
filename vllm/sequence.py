@@ -994,6 +994,28 @@ class SequenceGroupMetadata(
                            unless you are working with an encoder/decoder
                            model.
     """
+    """
+    SequenceGroupMetadata 类是 vLLM 中用于存储序列组元数据的重要数据结构，主要用于创建 AttentionMetadata
+    
+    Args:
+        request_id: str - 请求的唯一标识符
+        is_prompt: bool - 标识请求是否处于提示(prompt)阶段
+        seq_data: dict[int, SequenceData] - 序列数据字典，键为序列ID，值为对应的 SequenceData 对象
+        sampling_params: Optional[SamplingParams] - 用于生成输出的采样参数
+        block_tables: dict[int, list[int]] - 块表映射，键为序列ID，值为物理块号列表
+        do_sample: bool = True - 是否需要采样，当预填充被分块且当前迭代只计算查询token时不需要采样
+        token_chunk_size: Optional[int] = None - 每个序列要处理的token数量，如果不需要分块则为None
+        lora_request: Optional[LoRARequest] = None - LoRA请求对象
+        computed_block_nums: Optional[list[int]] = None - 已计算的块号列表，用于前缀缓存
+        state: Optional[SequenceGroupState] = SequenceGroupState() - 与此序列组相关的内部状态
+        token_type_ids: Optional[list[int]] = None - token类型ID列表
+        multi_modal_data: Optional[MultiModalKwargs] = None - 多模态数据
+        multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None - 多模态占位符字典
+        encoder_seq_data: Optional[SequenceData] = None - 编码器提示的序列数据（仅用于编码器-解码器模型）
+        cross_block_table: Optional[list[int]] = None - 与编码器提示关联的交叉注意力块表（仅用于编码器-解码器模型）
+        pooling_params: Optional[PoolingParams] = None - 池化参数
+        num_speculative_tokens: Optional[int] = None - 此请求中采用的推测性token数量，None表示未使用推测解码
+    """
 
     request_id: str
     is_prompt: bool

@@ -125,35 +125,65 @@ class SchedulingBudget:
 @dataclass
 class ScheduledSequenceGroup:
     # A sequence group that's scheduled.
+    # 被调度的序列组对象本身
     seq_group: SequenceGroup
+
     # The total chunk size (number of tokens) to process for next iteration.
     # 1 for decoding. Same as prompt tokens for prefill, but if prefill is
     # chunked, it can be smaller than that.
+    """
+    下一次迭代中要处理的 token 个数
+     - decode 阶段, 该值为 1
+     - prefill 阶段, 通常等于 prompt tokens 数量，但如果启用了 chunked prefill，则可能小于 prompt tokens 总数
+     - 不受投机采样影响, 投机采样的影响主要体现在 lookahead slot 的分配和管理上
+    """
     token_chunk_size: int
 
 
 @dataclass
 class SchedulerOutputs:
     """The scheduling decision made from a scheduler."""
+    """
+    封装一次调度决策的结果
+    """
 
     # Scheduled sequence groups.
+    # 调度的序列组信息
     scheduled_seq_groups: GenericSequence[ScheduledSequenceGroup]
+
     # Number of prefill groups scheduled.
+    # prefill 的组数
     num_prefill_groups: int
+
     # Total number of batched tokens.
+    # 当前批次中总的 token 数量，包括 prompt tokens 和生成的 tokens。这个数字用于控制批处理大小不超过硬件限制
     num_batched_tokens: int
+
     # Blocks to swap in. List of CPU -> GPU block number.
+    # 指示哪些块需要从 CPU 内存交换到 GPU 内存。每个元组表示 (CPU 块号, GPU 块号)
     blocks_to_swap_in: List[Tuple[int, int]]
+
     # Blocks to swap out. List of GPU -> CPU block number.
+    # 哪些块需要从 GPU 内存交换到 CPU 内存以释放 GPU 空间
     blocks_to_swap_out: List[Tuple[int, int]]
+
     # Blocks to copy. Source to dest block.
+    # 需要复制的块列表，通常用于在重新计算时复制共享的块或在块管理中进行其他复制操作。每个元组表示 (源块号, 目标块号)
     blocks_to_copy: List[Tuple[int, int]]
+
     # Sequence groups that are going to be ignored.
+    # 被忽略的序列组列表。这些序列组由于某些原因（如超过最大长度）没有被调度
     ignored_seq_groups: List[SequenceGroup]
+
     # The number of slots for lookahead decoding.
+    # 为推测解码（speculative decoding）预留的槽位数量。这些槽位用于存储可能被接受或拒绝的未来 token 的 KV 缓存
     num_lookahead_slots: int
+
     # The number of requests in the running queue
+    # 运行队列中的请求数量
     running_queue_size: int
+
+    # 被抢占的序列组数量。当系统资源不足时，某些序列组可能被抢占以腾出资源给其他序列组
     preempted: int
 
     def __post_init__(self):
@@ -1244,29 +1274,35 @@ class Scheduler:
         be swapped or preempted.
         """
         # Include running requests to the budget.
+        # 创建一个调度预算对象，包含token预算和序列数限制
         budget = SchedulingBudget(
             token_budget=self.scheduler_config.max_num_batched_tokens,
             max_num_seqs=self.scheduler_config.max_num_seqs,
         )
         # Make sure we include num running seqs before scheduling prefill,
         # so that we don't schedule beyond max_num_seqs for prefill.
+        # 将当前运行中的序列组计入预算，确保预填充调度不会超过最大序列数限制
         for seq_group in self.running:
             budget.add_num_seqs(seq_group.request_id,
                                 seq_group.get_max_num_running_seqs())
+        # 如果启用了LoRA，收集当前运行中使用的LoRA ID集合
         curr_loras = (set(
             seq_group.lora_int_id for seq_group in self.running
             if seq_group.lora_int_id > 0) if self.lora_enabled else None)
 
+        # 初始化三个空的调度输出对象：预填充、运行中序列、交换入序列
         prefills = SchedulerPrefillOutputs.create_empty()
         running_scheduled = SchedulerRunningOutputs.create_empty()
         swapped_in = SchedulerSwappedInOutputs.create_empty()
 
         # If any requests are swapped, prioritized swapped requests.
+        # 如果没有被交换出去的请求，则调度预填充请求（不启用分块）
         if not self.swapped:
             prefills = self._schedule_prefills(budget,
                                                curr_loras,
                                                enable_chunking=False)
 
+        # 如果没有预填充请求被调度且使用优先级调度策略，则执行优先级抢占
         if len(prefills.seq_groups
                ) == 0 and self.scheduler_config.policy == "priority":
             self._schedule_priority_preemption(budget)
@@ -1534,37 +1570,59 @@ class Scheduler:
     def schedule(
             self
     ) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs, bool]:
+        """此方法是 vLLM 调度器的核心方法, 负责调度 Sequence Groups 并生成执行所需的数据结构
+
+        该方法在每个推理步骤中被调用, 决定哪些序列组将参与当前批次的计算
+
+        Return: 三元组
+            List[SequenceGroupMetadata] 序列组元数据列表
+            SchedulerOutputs            调度输出信息
+            boolean                     是否允许异步输出处理
+        """
         # Schedule sequence groups.
         # This function call changes the internal states of the scheduler
         # such as self.running, self.swapped, and self.waiting.
+        # Step1 初始化和调度决策阶段
+        # 1. 记录当前调度开始时间
         scheduler_start_time = time.perf_counter()
-
+        # 2. 调用 _schedule() 方法进行实际调度决策，返回 SchedulerOutputs
         scheduler_outputs: SchedulerOutputs = self._schedule()
+        # 3. 获取当前时间戳用于记录调度时间
         now = time.time()
 
+        # 4. 如果未启用前缀缓存，则将 common_computed_block_nums 设置为空列表
         if not self.cache_config.enable_prefix_caching:
             common_computed_block_nums = []
-
+        # 5. 设置是否允许异步输出处理，基于调度器配置。
         allow_async_output_proc: bool = self.use_async_output_proc
 
+        # Step2 创建输入数据结构
         # Create input data structures.
+        # 初始化序列组元数据列表，用于存储每个调度序列组的元数据
         seq_group_metadata_list: List[SequenceGroupMetadata] = []
+        # 遍历所有已调度的序列组
         for i, scheduled_seq_group in enumerate(
                 scheduler_outputs.scheduled_seq_groups):
+            # 1. 获取当前调度的序列组
             seq_group = scheduled_seq_group.seq_group
+            # 2. 获取当前序列组的块大小
             token_chunk_size = scheduled_seq_group.token_chunk_size
+            # 3. 记录首次调度时间
             seq_group.maybe_set_first_scheduled_time(now)
 
+            # 4. 从对象缓存中获取序列组元数据对象，并清空之前的数据。
             seq_group_metadata = self._seq_group_metadata_cache[
                 self.cache_id].get_object()
             seq_group_metadata.seq_data.clear()
             seq_group_metadata.block_tables.clear()
 
+            # 5. 初始化序列数据和块表映射字典
             # seq_id -> SequenceData
             seq_data: Dict[int, SequenceData] = {}
             # seq_id -> physical block numbers
             block_tables: Dict[int, List[int]] = {}
 
+            # 6. Encoder-Decoder 架构相关处理
             if seq_group.is_encoder_decoder():
                 # Encoder associated with SequenceGroup
                 encoder_seq = seq_group.get_encoder_seq()
@@ -1578,21 +1636,25 @@ class Scheduler:
                 encoder_seq_data = None
                 cross_block_table = None
 
+            # 7. 为每个运行中的序列收集序列数据、块表，并标记所有块为已访问。
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 seq_id = seq.seq_id
                 seq_data[seq_id] = seq.data
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
                 self.block_manager.access_all_blocks_in_seq(seq, now)
 
+            # 8. 如果启用前缀缓存，获取所有运行序列的公共计算块ID。
             if self.cache_config.enable_prefix_caching:
                 common_computed_block_nums = (
                     self.block_manager.get_common_computed_block_ids(
                         seq_group.get_seqs(status=SequenceStatus.RUNNING)))
 
+            # 9. 初始化采样标志和是否未 prefill 判断
             do_sample = True
             is_prompt = seq_group.is_prefill()
             # We should send the metadata to workers when the first prefill
             # is sent. Subsequent requests could be chunked prefill or decode.
+            # 判断是否为首次预填充，并根据是否为分块预填充决定是否需要采样。
             is_first_prefill = False
             if is_prompt:
                 seqs = seq_group.get_seqs()
@@ -1609,6 +1671,7 @@ class Scheduler:
                         < seqs[0].data.get_len()):
                     do_sample = False
 
+            # 根据是否为首次预填充或是否启用增量数据传输，创建相应的元数据对象
             # It assumes the scheduled_seq_groups is ordered by
             # prefill < decoding.
             if is_first_prefill or not self.scheduler_config.send_delta_data:
@@ -1653,8 +1716,10 @@ class Scheduler:
                     token_chunk_size=token_chunk_size,
                     computed_block_nums=common_computed_block_nums,
                 )
+            # 将生成的元数据添加到列表中。
             seq_group_metadata_list.append(seq_group_metadata)
 
+            # 检查是否允许对当前序列组进行异步输出处理。
             if allow_async_output_proc:
                 allow_async_output_proc = self._allow_async_output_proc(
                     seq_group)
@@ -1663,17 +1728,22 @@ class Scheduler:
         # batch will have been computed before the next scheduling invocation.
         # This is because the engine assumes that a failure in model execution
         # will crash the vLLM instance / will not retry.
+        # 标记所有已调度序列组的块为已计算。
         for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
             self.block_manager.mark_blocks_as_computed(
                 scheduled_seq_group.seq_group,
                 scheduled_seq_group.token_chunk_size)
 
+        # Step3 后续处理
+        # 1. 重置下一个缓存ID的序列组元数据缓存。
         self._seq_group_metadata_cache[self.next_cache_id].reset()
 
+        # 2. 计算调度耗时
         scheduler_time = time.perf_counter() - scheduler_start_time
         # Add this to scheduler time to all the sequences that are currently
         # running. This will help estimate if the scheduler is a significant
         # component in the e2e latency.
+        # 3. 将调度时间添加到所有运行序列组的指标中。
         for seq_group in self.running:
             if seq_group is not None and seq_group.metrics is not None:
                 if seq_group.metrics.scheduler_time is not None:
@@ -1682,9 +1752,11 @@ class Scheduler:
                     seq_group.metrics.scheduler_time = scheduler_time
 
         # Move to next cache (if exists)
+        # 4. 切换到下一个缓存ID
         self.cache_id = self.next_cache_id
 
         # Return results
+        # 5. 返回序列组元数据列表、调度输出和异步处理标志
         return (seq_group_metadata_list, scheduler_outputs,
                 allow_async_output_proc)
 
