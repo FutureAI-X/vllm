@@ -662,8 +662,12 @@ class Scheduler:
 
     def get_and_reset_finished_requests_ids(self) -> List[str]:
         """Flushes the list of request ids of previously finished seq_groups."""
+        """获取并重置已完成请求的ID列表"""
+        # 1. 获取当前已完成请求的ID列表
         finished_requests_ids = self._finished_requests_ids
+        # 2. 重置内部列表为空
         self._finished_requests_ids = list()
+        # 3. 返回已完成请求的ID列表
         return finished_requests_ids
 
     def _schedule_running(

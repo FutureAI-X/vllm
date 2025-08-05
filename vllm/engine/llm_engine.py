@@ -90,19 +90,25 @@ class OutputData(NamedTuple):
 
 
 class SchedulerContext:
-    """此类是 vLLM 引擎中用于管理调度器输出上下文的辅助类"""
+    """此类是 vLLM 引擎中用于管理调度器输出上下文的辅助类
+
+    它主要用于在多步推理和异步处理场景中缓存和管理模型输出及相关元数据
+    """
 
     def __init__(self, multi_step_stream_outputs: bool = False):
-        # 双端队列, 缓存模型输出
+        # 缓存模型输出数据, 用于后续多步处理, 双端队列(支持从两端高效地添加和删除元素)
         self.output_queue: Deque[OutputData] = deque()
-        # 存储待处理的请求输出
+
+        # 请求输出列表, 在处理完模型输出后，将请求的输出添加到该列表中, 等待返回给客户端
         self.request_outputs: List[Union[RequestOutput,
                                          PoolingRequestOutput]] = []
-        # SequenceGroupMetadata
+        # 存储序列组的元数据信息
         self.seq_group_metadata_list: Optional[
             List[SequenceGroupMetadata]] = None
+
         # 调度器输出
         self.scheduler_outputs: Optional[SchedulerOutputs] = None
+
         # 是否为多步流输出
         self.multi_step_stream_outputs: bool = multi_step_stream_outputs
 
@@ -111,6 +117,7 @@ class SchedulerContext:
                       scheduler_outputs: SchedulerOutputs, is_async: bool,
                       is_last_step: bool,
                       is_first_step_output: Optional[bool]):
+        """将模型输出及相关元数据封装为 OutputData 对象并添加到 output_queue"""
         self.output_queue.append(
             OutputData(outputs=outputs,
                        seq_group_metadata_list=seq_group_metadata_list,
@@ -1517,24 +1524,32 @@ class LLMEngine:
 
         # Step6 输出处理
         # Finish the current step for all the sequence groups.
-        # 完成当前部署
+        # 1. 如果启用了多步解码, 在此处 step + 1
         if self.scheduler_config.is_multi_step:
             for seq_group in seq_group_metadata_list:
                 seq_group.finish_step()
 
+        # 2. 判断是否还有剩余解码步骤需要处理
         if not self._has_remaining_steps(seq_group_metadata_list):
+            # 如果没有剩余步骤, 则说明解码完成, 进行一些处理
+            # (1) 清空调度器的缓存
+            # 关于0的说明: LLM Engine 不支持流水线并行, 所有cached_scheduler_outputs只有一个元素
+            # 多步解码完成所有步骤后，需要清除缓存以准备下一轮解码
             # clear the cache if we have finished all the steps.
             if self.scheduler_config.is_multi_step:
                 self.cached_scheduler_outputs[0] = SchedulerOutputState()
 
+            # (2) 判断是否是多步解码的第一步
+            # 如果没有序列组元数据列表，则设置为False, 否则检查第一个序列组的步骤数是否为1
+            # 当num_steps > 1时，multi_step_model_runner会处理第一步的输出追加
             # is_first_step_output is True only when the num_steps of all
             # the sequences are 1. When the num_steps > 1,
             # multi_step_model_runner does the first-step output append.
             is_first_step_output: bool = False if not seq_group_metadata_list \
                 else seq_group_metadata_list[0].state.num_steps == 1
 
+            # (3) 添加到输出队列: 将当前步骤的结果添加到调度上下文（SchedulerContext）的输出队列中
             # Add results to the output_queue
-            # 添加到输出队列
             ctx.append_output(outputs=outputs,
                               seq_group_metadata_list=seq_group_metadata_list,
                               scheduler_outputs=scheduler_outputs,
@@ -1542,18 +1557,20 @@ class LLMEngine:
                               is_last_step=True,
                               is_first_step_output=is_first_step_output)
 
-            # 异步处理逻辑
+            # 异步处理逻辑: 如果启用了异步输出处理且有输出结果
             if outputs and allow_async_output_proc:
+                # 验证只有一个输出集（异步后处理器只处理单个输出集）
                 assert len(outputs) == 1, (
                     "Async postprocessor expects only a single output set")
-
+                # 调用_advance_to_next_step方法将输出token追加到序列中，为下一步做准备
                 self._advance_to_next_step(
                     outputs[0], seq_group_metadata_list,
                     scheduler_outputs.scheduled_seq_groups)
 
             # Check if need to run the usual non-async path
-            # 同步处理逻辑
+            # 同步处理逻辑: 如果不允许异步输出处理（即使用同步处理）
             if not allow_async_output_proc:
+                # 调用_process_model_outputs处理模型输出，包括更新序列状态、生成输出等
                 self._process_model_outputs(ctx=ctx)
 
                 # Log stats.
@@ -1562,15 +1579,17 @@ class LLMEngine:
                 # Tracing
                 self.do_tracing(scheduler_outputs)
         else:
-            # Multi-step case
+            # 如果有剩余步骤, 则直接返回结果
             return ctx.request_outputs
 
+        # 3. 判断是否所有请求都完成 (如果所有请求都完成则执行 if 中的逻辑)
         if not self.has_unfinished_requests():
             # Drain async postprocessor (if exists)
             if len(ctx.output_queue) > 0:
                 self._process_model_outputs(ctx=ctx)
             assert len(ctx.output_queue) == 0
 
+            # 停止 worker execute loop
             # Stop the execute model loop in parallel workers until there are
             # more requests to process. This avoids waiting indefinitely in
             # torch.distributed ops which may otherwise timeout, and unblocks
@@ -1579,6 +1598,7 @@ class LLMEngine:
             logger.debug("Stopping remote worker execution loop.")
             self.model_executor.stop_remote_worker_execution_loop()
 
+        # 4. 返回 ctx.request_outputs
         return ctx.request_outputs
 
     def _abort_and_cache_schedule(
@@ -1616,14 +1636,19 @@ class LLMEngine:
     def _has_remaining_steps(
         self, seq_group_metadata_list: Optional[List[SequenceGroupMetadata]]
     ) -> bool:
+        """检查多步解码(Multi-Step Decoding)是否还有剩余步骤"""
+        # Step1 如果没有启用多步解码或者序列组元数据列表为空，则直接返回 False
         if (not self.scheduler_config.is_multi_step
                 or not seq_group_metadata_list):
             return False
 
+        # Step2 剩余步骤一致性检查
         # TODO(will) this is a sanity check for nowto make sure that all the
         # seqs are on the same steps. Eventually we will want to do some sort of
         # dynamic scheduling when doing multi-step decoding.
+        # 1. 获取第一个序列组的剩余步骤数作为参考值
         ref_remaining_steps = seq_group_metadata_list[0].state.remaining_steps
+        # 2. 检查所有其他序列组的剩余步骤数是否与参考值一致
         if any([
                 seq_group.state.remaining_steps != ref_remaining_steps
                 for seq_group in seq_group_metadata_list[1:]
@@ -1631,6 +1656,7 @@ class LLMEngine:
             raise AssertionError("All running sequence groups should "
                                  "have the same remaining steps.")
 
+        # Step3 返回是否还有剩余步骤
         return ref_remaining_steps > 0
 
     def _cache_scheduler_outputs_for_multi_step(
