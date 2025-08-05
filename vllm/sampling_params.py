@@ -85,10 +85,13 @@ class GuidedDecodingParams:
 
 
 class RequestOutputKind(Enum):
+    # 每次返回完整的输出
     # Return entire output so far in every RequestOutput
     CUMULATIVE = 0
+    # 每次值返回增量部分
     # Return only deltas in each RequestOutput
     DELTA = 1
+    # 只返回最终结果
     # Do not return intermediate RequestOutput
     FINAL_ONLY = 2
 
@@ -180,36 +183,59 @@ class SamplingParams(
             sampling implementations, plugins, etc. Not used by any in-tree
             sampling implementations.
     """
-
+    # n 与 best_of 共同作用: 生成 best_of 个序列, 然后返回其中最好的 n 个序列
+    # 为每个 prompt 返回的序列数量, 默认为 1
     n: int = 1
+    # 为每个 prompt 生成的序列数量, 必须大于等于 n, 默认为 NONE(等于n), 仅在 V0 中支持
     best_of: Optional[int] = None
     _real_n: Optional[int] = None
+    # 存在惩罚, 基于 token 是否出现在已生成文本中. 范围：[-2.0, 2.0], <0鼓励重复 token, >0 鼓励新 token
     presence_penalty: float = 0.0
+    # 频率惩罚, 基于token在已生成文本中的频率. 范围：[-2.0, 2.0], <0鼓励重复 token, >0 鼓励新 token
     frequency_penalty: float = 0.0
+    # 重复惩罚，基于token在提示和已生成文本中的出现情况, <1鼓励重复 token, >1 鼓励新 token
     repetition_penalty: float = 1.0
+    # 控制采样随机性的温度参数, 值越低, 模型越确定, 值越高, 模型越随机。取值在 [0, 1] 范围内, 0.0 表示贪婪采样
     temperature: float = 1.0
+    # 只考虑累积概率达到top_p的token子集, 取值在 (0, 1] 内, 1表示考虑所有的 token
     top_p: float = 1.0
+    # 只考虑概率最大的top_k个token, 取值在 [0, inf) 内, 0或-1表示考虑所有的 token
     top_k: int = 0
     min_p: float = 0.0
+    # 随机种子, 用于控制生成的随机性，确保结果可重现
     seed: Optional[int] = None
+    # 停止字符串列表, 当生成这些字符串时停止生成，返回的输出不包含这些字符串
     stop: Optional[Union[str, list[str]]] = None
+    # 停止token ID列表, 当生成这些token ID时停止生成
     stop_token_ids: Optional[list[int]] = None
+    # 是否忽略 EOS token
     ignore_eos: bool = False
+    # 每个输出序列的最大token数, 生成的token数不会超过此值
     max_tokens: Optional[int] = 16
+    # 每个输出序列的最小token数
     min_tokens: int = 0
+    # 每个输出token返回的对数概率数量
     logprobs: Optional[int] = None
+    # 每个提示token返回的对数概率数量
     prompt_logprobs: Optional[int] = None
     # NOTE: This parameter is only exposed at the engine level for now.
     # It is not exposed in the OpenAI API server, as the OpenAI API does
     # not support returning only a list of token IDs.
+    # 是否对输出进行解码
     detokenize: bool = True
+    # 是否跳过特殊token
     skip_special_tokens: bool = True
+    # 是否在特殊token之间添加空格
     spaces_between_special_tokens: bool = True
     # Optional[list[LogitsProcessor]] type. We use Any here because
     # Optional[list[LogitsProcessor]] type is not supported by msgspec.
+    # 自定义logits处理器列表: 基于先前生成的token修改logits的函数列表
     logits_processors: Optional[Any] = None
+    # 是否在输出中包含停止字符串
     include_stop_str_in_output: bool = False
+    # prompt token截断: None不截断, -1使用模型支持的截断大小, 整数k只使用最后k个token
     truncate_prompt_tokens: Optional[Annotated[int, msgspec.Meta(ge=1)]] = None
+    # 输出类型控制:
     output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE
 
     # The below fields are not supposed to be used as an input.
@@ -218,12 +244,17 @@ class SamplingParams(
     _all_stop_token_ids: set[int] = msgspec.field(default_factory=set)
 
     # Fields used to construct logits processors
+    # 引导解码参数
     guided_decoding: Optional[GuidedDecodingParams] = None
+    # Logit偏置: 对特定token应用偏置值
     logit_bias: Optional[dict[int, float]] = None
+    # 允许的token ID列表, 只保留指定token ID的分数
     allowed_token_ids: Optional[list[int]] = None
+    # 额外参数, 供自定义采样实现使用的任意额外参数
     extra_args: Optional[dict[str, Any]] = None
 
     # Fields used for bad words
+    # 禁止生成的词汇列表, 确保这些词不会出现在生成结果中
     bad_words: Optional[list[str]] = None
     _bad_words_token_ids: Optional[list[list[int]]] = None
 
