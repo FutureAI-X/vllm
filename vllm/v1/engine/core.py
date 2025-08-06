@@ -265,14 +265,21 @@ class EngineCore:
         was executed.
         """
 
+        # Step1 检查调度器中是否有请求
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return {}, False
+
+        # Step2 执行一次调度
         scheduler_output = self.scheduler.schedule()
+
+        # Step3 执行模型
         model_output = self.execute_model_with_error_logging(
             self.model_executor.execute_model,  # type: ignore
             scheduler_output)
+
+        # Step4 根据模型输出更新调度器
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output)  # type: ignore
 

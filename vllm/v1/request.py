@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
 
 class Request:
+    """由 Scheduler 调度的请求"""
 
     def __init__(
         self,
@@ -37,6 +38,22 @@ class Request:
         cache_salt: Optional[str] = None,
         priority: int = 0,
     ) -> None:
+        """
+            request_id: str：请求的唯一标识符
+            prompt_token_ids: list[int]：提示词的token ID列表
+            multi_modal_inputs: Optional[list[MultiModalKwargs]]：多模态输入数据
+            multi_modal_hashes: Optional[list[str]]：多模态输入的哈希值
+            multi_modal_placeholders: Optional[list[PlaceholderRange]]：多模态占位符范围
+            sampling_params: Optional[SamplingParams]：采样参数
+            pooling_params: Optional[PoolingParams]：池化参数
+            eos_token_id: Optional[int]：结束符token ID
+            client_index: int = 0：客户端索引，默认为0
+            arrival_time: Optional[float] = None：请求到达时间，默认为当前时间
+            lora_request: Optional["LoRARequest"]：LoRA请求参数
+            structured_output_request: Optional["StructuredOutputRequest"]：结构化输出请求
+            cache_salt: Optional[str] = None：缓存盐值
+            priority: int = 0：请求优先级，默认为0
+        """
         self.request_id = request_id
         self.client_index = client_index
         self.priority = priority
@@ -78,7 +95,17 @@ class Request:
         self._output_token_ids: list[int] = []
         self._all_token_ids: list[int] = self.prompt_token_ids.copy()
         self.num_output_placeholders = 0  # Used in async scheduling.
+        # 投机解码 token
         self.spec_token_ids: list[int] = []
+        """
+        已计算的 token 数, 表示模型已经实际处理并生成输出的 token 数量 = prompt tokens + output tokens
+        
+        主要用途:
+            调度管理：帮助调度器了解请求的处理进度
+            缓存管理：确定哪些tokens的结果已经被缓存
+            抢占恢复：在请求被抢占后恢复时，知道从哪里继续计算
+            性能优化：避免重复计算已经处理过的tokens
+        """
         self.num_computed_tokens = 0
         self.cache_salt: Optional[str] = cache_salt
 
@@ -106,6 +133,21 @@ class Request:
 
         # The number of NaNs in logits. A value greater than 0
         # indicates that the output is corrupted
+        """
+        是一个计数器，用于记录在模型推理过程中 logits（模型输出的原始分数）中出现 NaN（Not a Number）值的数量
+        
+        背景知识
+            Logits：神经网络最后一层的原始输出，通常是未归一化的分数
+            NaN：在浮点运算中表示无效或未定义的结果（如 0/0 或 ∞-∞）
+        出现原因：
+            数值不稳定（如梯度爆炸）
+            模型训练或推理中的异常情况
+            硬件或计算错误
+        用途
+            质量控制：检测模型输出是否可靠
+            错误处理：当输出损坏时可以采取相应措施（如终止请求）
+            调试诊断：帮助识别模型推理中的问题
+        """
         self.num_nans_in_logits = 0
 
     @classmethod
@@ -138,15 +180,19 @@ class Request:
         self,
         token_ids: Union[int, list[int]],
     ) -> None:
+        """添加(记录)新生成的 token"""
+        # 单个 token
         if isinstance(token_ids, int):
             self._output_token_ids.append(token_ids)
             self._all_token_ids.append(token_ids)
+        # 多个 token
         else:
             self._output_token_ids.extend(token_ids)
             self._all_token_ids.extend(token_ids)
 
     @property
     def is_output_corrupted(self) -> bool:
+        """检查模型输出是否已损坏"""
         return self.num_nans_in_logits > 0
 
     @property
@@ -193,16 +239,28 @@ class Request:
 
 class RequestStatus(enum.IntEnum):
     """Status of a request."""
+    """
+    enum.auto() 是 Python 标准库 enum 模块中的一个函数，用于自动为枚举成员分配值，每个枚举成员会自动获得一个递增的整数值，从 1 开始。
+    """
+    # 等待处理
     WAITING = enum.auto()
+    # 等待FSM处理
     WAITING_FOR_FSM = enum.auto()
+    # 等待远程KV处理
     WAITING_FOR_REMOTE_KVS = enum.auto()
+    # 运行中
     RUNNING = enum.auto()
+    # 被抢占/暂停
     PREEMPTED = enum.auto()
     # Note: anything after PREEMPTED will be considered
     # as a finished status.
+    # 请求正常完成
     FINISHED_STOPPED = enum.auto()
+    # 请求因达到最大长度限制而完成
     FINISHED_LENGTH_CAPPED = enum.auto()
+    # 请求被中止
     FINISHED_ABORTED = enum.auto()
+    # 请求被忽略（如提示过长）
     FINISHED_IGNORED = enum.auto()
 
     def __str__(self):

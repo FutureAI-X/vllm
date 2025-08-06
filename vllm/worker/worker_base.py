@@ -388,8 +388,19 @@ class LocalOrDistributedWorkerBase(WorkerBase):
     ) -> Optional[List[SamplerOutput]]:
         """Executes at least one model step on the given sequences, unless no
         sequences are provided."""
+        """执行模块推理的核心方法, 负责处理模型输入, 执行模型计算并返回输出结果
+        
+        Args:
+            ExecuteModelRequest
+            
+        Returns:
+            List[SamplerOutput]
+        """
+        # Step1 前置准备
+        # 1. 记录开始时间
         start_time = time.perf_counter()
 
+        # 2. 准备输入数据
         inputs = self.prepare_input(execute_model_req)
         if inputs is None:
             return None
@@ -397,23 +408,28 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         model_input, worker_input, kwargs = inputs
         num_steps = worker_input.num_steps
 
+        # 3. 执行 worker 的特定逻辑 (如缓存管理)
         self.execute_worker(worker_input)
 
         # If there is no input, we don't need to execute the model.
         if worker_input.num_seq_groups == 0:
             return []
 
+        # 4. 处理流水线并行中的非首阶段
         intermediate_tensors = None
         orig_model_execute_time = 0.0
         if not get_pp_group().is_first_rank:
+            # 对于流水线并行中非第一阶段的worker，从上一阶段接收中间张量
             intermediate_tensors = IntermediateTensors(
                 get_pp_group().recv_tensor_dict(
                     all_gather_group=get_tp_group()))
+            # 如果启用了性能监控，还会获取之前的模型执行时间
             if (self.observability_config is not None
                     and self.observability_config.collect_model_execute_time):
                 orig_model_execute_time = intermediate_tensors.tensors.get(
                     "model_execute_time", torch.tensor(0)).item()
 
+        # Step2 执行模型计算
         output = self.model_runner.execute_model(
             model_input=model_input,
             kv_caches=self.kv_cache[worker_input.virtual_engine]
@@ -423,17 +439,24 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             **kwargs,
         )
 
+        # Step3 后置处理
+        # 1. 计算执行时间
         model_execute_time = time.perf_counter() - start_time
+        # 2. 处理流水线并行中的非尾阶段
         if not get_pp_group().is_last_rank:
             # output is IntermediateTensors
             assert isinstance(output, IntermediateTensors)
+            # 如果启用了性能监控，会累计执行时间
             if (self.observability_config is not None
                     and self.observability_config.collect_model_execute_time):
                 output.tensors["model_execute_time"] = torch.tensor(
                     model_execute_time + orig_model_execute_time)
+            # 对于非最后阶段，将中间结果发送给下一阶段
             get_pp_group().send_tensor_dict(output.tensors,
                                             all_gather_group=get_tp_group())
             return [None]
+
+        # 3. 处理性能监控数据
         if (self.observability_config is not None
                 and self.observability_config.collect_model_execute_time
                 and output is not None):
@@ -441,6 +464,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                 o.model_execute_time = (orig_model_execute_time +
                                         model_execute_time)
 
+        # 4. 返回结果
         # output is List[SamplerOutput]
         return output
 
@@ -488,6 +512,12 @@ class WorkerWrapperBase:
     and class name. Then, when we call `update_environment_variables`, and the
     real initialization happens in `init_worker`.
     """
+    """
+    这个类代表了 executor/engine 中的一个进程. 
+    它负责延迟初始化 worker 并管理 worker 生命周期
+    我们首先实例化 WorkerWrapper, 它会记住 worker module 和 class name
+    然后, 当我们调用 update_environment_variables 时, 实际的初始化在 init_worker 中进行
+    """
 
     def __init__(
         self,
@@ -503,6 +533,17 @@ class WorkerWrapperBase:
         users can launch 2 engines/executors, each with only 1 worker.
         All workers have rpc_rank=0, but they have different ranks in the TP
         group.
+        """
+        """
+        使用 vllm_config 和 rpc_rank 初始化 worker wrapper
+        Note: 
+            rpc_rank 是 worker 在 executor 中的排名.
+            在大多数情况下, 它也是 worker 在 distributed group 中的排名
+            然而, 当多个 executor 一起工作时, 可能会有所不同.
+            例如: 
+                在采用 TP=2 的 SPMD-style offline inference 时
+                用户可以启动 2 个 engine/executor, 每一个仅包括 1 个 worker
+                所有 worker 的 rpc_rank 都是0, 但是在 TP group 中的排名不同
         """
         self.rpc_rank = rpc_rank
         self.worker: Optional[WorkerBase] = None
@@ -543,18 +584,30 @@ class WorkerWrapperBase:
         Here we inject some common logic before initializing the worker.
         Arguments are passed to the worker class constructor.
         """
+        """
+        在这里我们在初始化worker之前注入一些通用逻辑。
+        参数会被传递给worker类的构造函数。
+        """
+        # Step1 参数处理与前置逻辑
+        # 1. 获取当前 rank 对应的参数并处理
         kwargs = all_kwargs[self.rpc_rank]
+        # 2. 提取 vllm_config 并进行验证
         self.vllm_config = kwargs.get("vllm_config", None)
         assert self.vllm_config is not None, (
             "vllm_config is required to initialize the worker")
+        # 3. 为当前线程启用函数调用跟踪功能
         enable_trace_function_call_for_thread(self.vllm_config)
 
+        # 4. 加载通用插件
         from vllm.plugins import load_general_plugins
         load_general_plugins()
 
+        # Step2 根据 worker_cls 的类型获取 worker 类
+        # 1. 如果是字符串, 则根据字符串获取 worker 类
         if isinstance(self.vllm_config.parallel_config.worker_cls, str):
             worker_class = resolve_obj_by_qualname(
                 self.vllm_config.parallel_config.worker_cls)
+        # 2. 否则认为是字节码(已序列化的类), 则使用反序列化, 并打印相关警告
         else:
             logger.warning(
                 "passing worker_cls as a class object is strongly deprecated,"
@@ -566,12 +619,17 @@ class WorkerWrapperBase:
                               bytes)
             worker_class = cloudpickle.loads(
                 self.vllm_config.parallel_config.worker_cls)
+
+        # Step3 处理 worker_extension_cls (worker 扩展类)
         if self.vllm_config.parallel_config.worker_extension_cls:
+            # 1. 获取实际类对象
             worker_extension_cls = resolve_obj_by_qualname(
                 self.vllm_config.parallel_config.worker_extension_cls)
+            # 2. 动态将扩展类添加到 worker_class 中
             extended_calls = []
             if worker_extension_cls not in worker_class.__bases__:
                 # check any conflicts between worker and worker_extension_cls
+                # (1) 检查 worker 和 worker_extension_cls 之间是否有冲突
                 for attr in dir(worker_extension_cls):
                     if attr.startswith("__"):
                         continue
@@ -582,11 +640,14 @@ class WorkerWrapperBase:
                     if callable(getattr(worker_extension_cls, attr)):
                         extended_calls.append(attr)
                 # dynamically inherit the worker extension class
+                # (2) 动态将 worker_extension_cls 添加到 worker_class 中
                 worker_class.__bases__ = worker_class.__bases__ + (
                     worker_extension_cls, )
                 logger.info(
                     "Injected %s into %s for extended collective_rpc calls %s",
                     worker_extension_cls, worker_class, extended_calls)
+
+        # Step4 实例化 worker
         with set_current_vllm_config(self.vllm_config):
             # To make vLLM config available during worker initialization
             self.worker = worker_class(**kwargs)
@@ -619,6 +680,14 @@ class WorkerWrapperBase:
             logger.exception(msg)
             raise e
 
+    """
+    这个方法是 Python 中的一个特殊方法 (魔术方法), 它的作用是当访问对象的属性或方法失败时, 会调用这个方法来尝试从另一个对象中获取该属性或方法
+    
+    1. 当访问一个未在 WorkerWrapperBase 中定义的属性或方法时, 会触发此方法
+    2. 使用 Python 内置的 getattr 方法从 self.worker 中获取相应的属性或方法并返回
+    
+    这种设计模式称为 [委托 Delegation]
+    """
     def __getattr__(self, attr):
         return getattr(self.worker, attr)
 

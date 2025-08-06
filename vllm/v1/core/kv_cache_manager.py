@@ -25,6 +25,7 @@ class KVCacheBlocks:
     Scheduler and KVCacheManager, to hide KVCacheManager's internal data
     structure from the Scheduler.
     """
+    """KVCacheManager 的分配结果，作为调度器和 KVCacheManager 之间的接口，用于向调度器隐藏 KVCacheManager 的内部数据结构。"""
     blocks: tuple[list[KVCacheBlock], ...]
     """
     blocks[i][j] refers to the i-th kv_cache_group and the j-th block of tokens.
@@ -33,9 +34,34 @@ class KVCacheBlocks:
     will be broken if we want to give different block_size to different 
     kv_cache_groups in the future.
     """
+    """blocks[i][j] 表示第 i 个 kv_cache_group 和第 j 个 token 块。 我们不使用 token 块作为外层维度，因为这假设所有 kv_cache_groups 具有相同数量的块，目前这是正确的，但如果我们想要为不同的 kv_cache_groups 提供不同的 block_size，这种假设将不再成立。"""
 
     def __add__(self, other: "KVCacheBlocks") -> "KVCacheBlocks":
         """Adds two KVCacheBlocks instances."""
+        """拼接两个 KVCacheBlocks 实例
+        
+        示例:
+            # 第一个实例，包含2个缓存组，每组各有2个块
+            blocks1 = KVCacheBlocks((
+                [block_a1, block_a2],      # 第1个KV缓存组
+                [block_b1, block_b2]       # 第2个KV缓存组
+            ))
+            
+            # 第二个实例，同样包含2个缓存组，每组各有1个块
+            blocks2 = KVCacheBlocks((
+                [block_a3],                # 第1个KV缓存组
+                [block_b3]                 # 第2个KV缓存组
+            ))
+            
+            # 相加操作
+            result = blocks1 + blocks2
+            
+            # 结果为：
+            result = KVCacheBlocks((
+                [block_a1, block_a2, block_a3],  # 第1个KV缓存组，块列表连接
+                [block_b1, block_b2, block_b3]   # 第2个KV缓存组，块列表连接
+            ))
+        """
         return KVCacheBlocks(
             tuple(blk1 + blk2
                   for blk1, blk2 in zip(self.blocks, other.blocks)))
@@ -49,10 +75,15 @@ class KVCacheBlocks:
             * the outer tuple corresponds to KV cache groups
             * each inner list contains the block_ids of the blocks in that group
         """
+        """
+        它遍历每个KV缓存组中的所有块，并提取每个块的 block_id。
+        返回值是一个嵌套结构：外层元组对应不同的KV缓存组，内层列表包含该组中所有块的ID
+        """
         return tuple([blk.block_id for blk in group] for group in self.blocks)
 
     def get_unhashed_block_ids(self) -> list[int]:
         """Get block_ids of unhashed blocks from KVCacheBlocks instance."""
+        """获取未哈希块的块ID列表"""
         assert len(self.blocks) == 1, "Only one group is supported"
         return [
             block.block_id for block in self.blocks[0]
@@ -61,6 +92,7 @@ class KVCacheBlocks:
 
     def new_empty(self) -> "KVCacheBlocks":
         """Creates a new KVCacheBlocks instance with no blocks."""
+        """这个方法创建一个新的空 KVCacheBlocks 实例，保持与当前实例相同的KV缓存组数量结构，但不包含任何实际块。"""
         return KVCacheBlocks(tuple([] for _ in range(len(self.blocks))))
 
 
@@ -154,8 +186,21 @@ class KVCacheManager:
                 - A list of blocks that are computed for the request.
                 - The number of computed tokens.
         """
+        """
+        获取请求已计算(缓存)的 blocks, 注意必须是完整的块
+        
+        Args:
+            request: 要计算的请求
+            
+        Returns:
+            - 请求已计算的 blocks list
+            - 已计算的令牌数
+        """
         # Prefix caching is disabled or
         # When the request requires prompt logprobs, we skip prefix caching.
+        # 如果满足任一条件, 则跳过前缀缓存, 返回空
+        # 1. 禁用了前缀缓存
+        # 2. 请求需要 prompt logprobs
         if (not self.enable_caching
                 or (request.sampling_params is not None
                     and request.sampling_params.prompt_logprobs is not None)):
@@ -163,7 +208,9 @@ class KVCacheManager:
 
         # The block hashes for the request may already be computed
         # if the scheduler has tried to schedule the request before.
+        # 尝试从缓存中获取请求的块哈希值
         block_hashes = self.req_to_block_hashes[request.request_id]
+        # 如果没有缓存，则使用 hash_request_tokens 函数计算哈希值并存储到 req_to_block_hashes 中
         if not block_hashes:
             assert self.block_size is not None
             block_hashes = hash_request_tokens(self.caching_hash_fn,
@@ -176,11 +223,15 @@ class KVCacheManager:
         # the single last token, because allocate_slots() requires
         # num_computed_tokens to be block-size aligned. Removing this limitation
         # could slightly improve performance in the future.
+        # 设置最大缓存命中长度为请求令牌数减1, 这是因为即使所有令牌都命中缓存，也需要重新计算最后一个令牌以获取 logits
         max_cache_hit_length = request.num_tokens - 1
+        # 调用协调器的 find_longest_cache_hit 方法查找最长的缓存命中
+        # 返回已计算的块和新计算的令牌数
         computed_blocks, num_new_computed_tokens = (
             self.coordinator.find_longest_cache_hit(block_hashes,
                                                     max_cache_hit_length))
 
+        # 如果启用了统计日志，则更新前缀缓存统计信息
         if self.log_stats:
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.requests += 1

@@ -23,7 +23,26 @@ InputBatch = Union[TPUInputBatch, GPUInputBatch]
 
 logger = init_logger(__name__)
 
+"""
+为 GPUModelRunner 定义一个支持 LoRA(Low-Rank Adaptation) 的 Mixin 类
 
+用于在 vLLM 中动态加载、激活和管理 LoRA 适配器, 功能包括:
+1. 加载LoRA模型并初始化LoRA管理器；
+2. 激活指定的LoRA适配器；
+3. 提供上下文管理器用于设置和选择虚拟LoRA（测试用）；
+4. 支持添加、删除、固定和列出LoRA适配器。
+
+Mixin 是一种面向对象编程中的设计模式，具有以下特点：
+1. 定义：Mixin 是一种特殊的类，用于为其他类提供特定功能，但通常不作为独立的基类使用。
+2. 用途：
+    提供可重用的功能模块
+    避免多重继承的复杂性
+    实现横切关注点（cross-cutting concerns）
+3. 在 Python 中的特点：
+    通常不单独实例化
+    可以被多个不同的类继承
+    提供额外的方法和属性
+"""
 # Defined as a mixin for GPUModelRunner
 class LoRAModelRunnerMixin:
 

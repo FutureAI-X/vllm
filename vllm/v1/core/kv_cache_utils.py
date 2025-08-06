@@ -27,6 +27,11 @@ class BlockHash(NamedTuple):
     hash collisions when the hash value is the same. By using SHA256 however,
     hash collisions are practically impossible.
     """
+    """
+    块的哈希值（整数）、块中的 token ID 以及额外的键。 
+    我们保留 token ID 和额外键的元组，以减少当哈希值相同时发生哈希冲突的可能性。
+    然而，通过使用 SHA256，哈希冲突在实际中是不可能发生的。
+    """
     # Hash value of the block in an integer.
     hash_value: int
     # Token IDs in the block.
@@ -138,20 +143,31 @@ class PrefixCachingMetrics:
 @dataclass
 class KVCacheBlock:
     """KV-cache block metadata."""
+    """代表一个 KV 缓存块的基本信息和状态"""
+
+    # 块的ID，范围从 0 到 num_gpu_blocks - 1
     # Block ID, ranging from 0 to num_gpu_blocks - 1.
     block_id: int
+
+    # 引用计数，表示有多少个请求正在使用这个块，默认为 0
     # Reference count.
     ref_cnt: int = 0
+
+    # 块的哈希值，包含块哈希和 token ID 元组，仅在块满时可用
     # The hash of the block composed of (block hash, tuple of token IDs).
     # It is only available when the block is full.
     _block_hash: Optional[BlockHashWithGroupId] = None
 
     # Used to construct a doubly linked list for free blocks.
     # These two attributes should only be manipulated by FreeKVCacheBlockQueue.
+    # 用于构建空闲块的双向链表, 这些链表属性专门由 FreeKVCacheBlockQueue 类操作，用于高效管理空闲块
+    # 指向前一个空闲块的指针
     prev_free_block: Optional["KVCacheBlock"] = None
+    # 指向后一个空闲块的指针
     next_free_block: Optional["KVCacheBlock"] = None
 
     # Whether the block is a null block that should never be cached.
+    # 是否为空, 空块不应该被缓存
     is_null: bool = False
 
     @property
@@ -171,6 +187,10 @@ class KVCacheBlock:
     def __repr__(self) -> str:
         # Use block_id instead of KVCacheBlock object to avoid calling __repr__
         # on KVCacheBlock object recursively.
+        """这段代码定义了KVCacheBlock类的字符串表示方法。
+
+        为了避免递归调用__repr__导致无限循环，它只显示前后空闲块的block_id而不是整个对象。最终返回包含块ID、引用计数、哈希值和前后空闲块ID的格式化字符串。
+        """
         prev_block_id = (self.prev_free_block.block_id
                          if self.prev_free_block else None)
         next_block_id = (self.next_free_block.block_id
@@ -559,28 +579,37 @@ def hash_request_tokens(hash_function: Any, block_size: int,
     Returns:
         The list of computed hash values.
     """
+    # 获取请求的全部 token
     token_ids = request.all_token_ids
 
+    #是否需要额外键: 多模态、LoRA等
     req_need_extra_keys = need_extra_keys(request)
     req_extra_keys = None
     curr_mm_idx = 0
 
     ret = []
     parent_block_hash_value = None
+    # 将输入 token 按照 block_size 分块
     # Only full blocks will be hashed
     for start in range(0, len(token_ids) - block_size + 1, block_size):
+        # 获取此块的 token
         end = start + block_size
         block_token_ids = token_ids[start:end]
 
+        # 是否需要额外参数
         if req_need_extra_keys:
             # MM and LoRA requests need extra keys for block-hash computation.
             req_extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
                 request, start, end, curr_mm_idx)
 
+        # 计算 block hash
         block_hash = hash_block_tokens(hash_function, parent_block_hash_value,
                                        block_token_ids, req_extra_keys)
+        # 添加到返回结果中
         ret.append(block_hash)
+        # 更新 parent_block_hash_value, 供下一块使用
         parent_block_hash_value = block_hash.hash_value
+    # 执行返回
     return ret
 
 

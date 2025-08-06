@@ -34,6 +34,7 @@ class RequestQueue(ABC):
     @abstractmethod
     def peek_request(self) -> Request:
         """Peek at the request at the front of the queue without removing it."""
+        """查看队列最前端的请求, 并且不移除"""
         pass
 
     @abstractmethod

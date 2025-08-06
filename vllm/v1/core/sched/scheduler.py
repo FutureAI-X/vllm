@@ -49,6 +49,7 @@ class Scheduler(SchedulerInterface):
         include_finished_set: bool = False,
         log_stats: bool = False,
     ) -> None:
+        # 基本配置相关属性
         self.vllm_config = vllm_config
         self.scheduler_config = vllm_config.scheduler_config
         self.cache_config = vllm_config.cache_config
@@ -56,25 +57,34 @@ class Scheduler(SchedulerInterface):
         self.kv_cache_config = kv_cache_config
         self.kv_events_config = vllm_config.kv_events_config
         self.parallel_config = vllm_config.parallel_config
+        # 布尔值，控制是否记录统计信息
         self.log_stats = log_stats
+        # 结构化输出管理器
         self.structured_output_manager = structured_output_manager
 
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
         # by update_from_outputs(). This is currently used in the multi-engine
         # case to track request lifetimes efficiently.
+        # 用于在多引擎情况下跟踪已完成请求的 ID
         self.finished_req_ids_dict: Optional[dict[int, set[str]]] = (
             defaultdict(set) if include_finished_set else None)
 
+        # 调度约束相关属性
         # Scheduling constraints.
+        # 最大并发运行请求数
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
+        # 每批次最大调度 token 数
         self.max_num_scheduled_tokens = \
             self.scheduler_config.max_num_batched_tokens
+        # 模型最大长度
         self.max_model_len = self.scheduler_config.max_model_len
+        # 指示是否启用 KV 缓存事件
         self.enable_kv_cache_events = (
             self.kv_events_config is not None
             and self.kv_events_config.enable_kv_cache_events)
 
+        # KV 连接器对象，用于在调度器和工作节点之间传输 KV 缓存
         # Create KVConnector for the Scheduler. Note that each Worker
         # will have a corresponding KVConnector with Role=WORKER.
         # KV Connector pushes/pull of remote KVs for P/D and offloading.
@@ -86,18 +96,24 @@ class Scheduler(SchedulerInterface):
             self.connector = KVConnectorFactory.create_connector(
                 config=self.vllm_config, role=KVConnectorRole.SCHEDULER)
 
+        # KV 事件发布器
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
             self.parallel_config.data_parallel_rank,
         )
 
+        # gpu block num
         num_gpu_blocks = self.cache_config.num_gpu_blocks
         assert num_gpu_blocks is not None and num_gpu_blocks > 0
 
+        # 每个 block 存储的 token 数
         self.block_size = self.cache_config.block_size
 
+        # 存储所有请求，键为请求 ID，值为 Request 对象
         # req_id -> Request
         self.requests: dict[str, Request] = {}
+
+        # 调度策略
         # Scheduling policy
         if self.scheduler_config.policy == "priority":
             self.policy = SchedulingPolicy.PRIORITY
@@ -106,16 +122,22 @@ class Scheduler(SchedulerInterface):
         else:
             raise ValueError(
                 f"Unknown scheduling policy: {self.scheduler_config.policy}")
+
+        # 等待队列，存储待处理的请求
         # Priority queues for requests.
         self.waiting = create_request_queue(self.policy)
+
+        # 存储正在运行的请求
         self.running: list[Request] = []
 
+        # 存储在上一步和当前步骤之间完成的请求 ID
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
         # requests so that they can free the cached states for those requests.
         # This is flushed at the end of each scheduling step.
         self.finished_req_ids: set[str] = set()
 
+        # 存储正在进行异步 KV 加载或接收的请求
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
 
@@ -130,9 +152,11 @@ class Scheduler(SchedulerInterface):
             mm_registry=mm_registry,
         )
 
+        # 推理相关属性
         # NOTE(woosuk): Here, "encoder" includes the vision encoder (and
         # projector if needed). Currently, we assume that the encoder also
         # has the Transformer architecture (e.g., ViT).
+        # 编码器输入 token 的最大数量
         self.max_num_encoder_input_tokens = encoder_compute_budget
         # NOTE: For the models without encoder (e.g., text-only models),
         # the encoder cache will not be initialized because cache size is 0
@@ -142,7 +166,9 @@ class Scheduler(SchedulerInterface):
 
         speculative_config = vllm_config.speculative_config
 
+        # 是否使用 eagle
         self.use_eagle = False
+        # 推测性解码中推测的 token 数量
         self.num_spec_tokens = self.num_lookahead_tokens = 0
         if speculative_config:
             self.num_spec_tokens = speculative_config.num_speculative_tokens
@@ -150,6 +176,7 @@ class Scheduler(SchedulerInterface):
                 self.use_eagle = True
                 self.num_lookahead_tokens = self.num_spec_tokens
 
+        # KV 缓存管理器
         # Create the KV cache manager.
         self.kv_cache_manager = KVCacheManager(
             kv_cache_config=kv_cache_config,
@@ -160,6 +187,8 @@ class Scheduler(SchedulerInterface):
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
         )
+
+        # 是否使用流水线并行
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
 
     def schedule(self) -> SchedulerOutput:
@@ -173,10 +202,24 @@ class Scheduler(SchedulerInterface):
         # num_tokens_with_spec. This is general enough to cover
         # chunked prefills, prefix caching, speculative decoding,
         # and the "jump decoding" optimization in the future.
+        """
+        关于调度算法
+        - Scheduler 没有预填充阶段(prefill phase)和解码阶段(decoding phase)的概念
+        - 每个请求只有 num_computed_tokens 和 num_tokens_with_spec
+          num_tokens_with_spec = len(prompt_token_ids) + len(output_token_ids) + len(spec_token_ids)
+        - 在每个 step 中, scheduler 尝试为请求分配 token, 使每个请求的 num_computed_tokens 可以追的上 num_tokens_with_spec
+        - 这种方法足够通用，可以涵盖分块预填充、前缀缓存、推测解码以及未来的跳跃解码优化
+        """
 
+        # Step1 参数初始化
+        # 1. 定义存储不同状态的请求列表
+        # 新调度的请求
         scheduled_new_reqs: list[Request] = []
+        # 恢复的请求
         scheduled_resumed_reqs: list[Request] = []
+        # 运行中的请求
         scheduled_running_reqs: list[Request] = []
+        # 被抢占的请求
         preempted_reqs: list[Request] = []
 
         # NOTE: structured_output_request_ids maps
@@ -185,20 +228,26 @@ class Scheduler(SchedulerInterface):
         # This will helps us determine to slice the grammar bitmask
         # and only applies valid mask for requests that
         # uses structured decoding.
+        # 结构化输出请求的ID映射
         structured_output_request_ids: dict[str, int] = {}
-
+        # 请求对应的新块ID列表
         req_to_new_block_ids: dict[str, tuple[list[int], ...]] = {}
+        # 统计每个请求已调度的token数量
         num_scheduled_tokens: dict[str, int] = {}
+        # 设置token调度的预算限制
         token_budget = self.max_num_scheduled_tokens
+        # Encoder 相关
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
         encoder_budget = self.max_num_encoder_input_tokens
+        # 推测性解码相关
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
 
         # For logging.
         scheduled_timestamp = time.monotonic()
 
+        # Step2 调度运行中的请求
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
@@ -328,12 +377,16 @@ class Scheduler(SchedulerInterface):
         # skipped and put back at the head of the waiting queue later
         skipped_waiting_requests = create_request_queue(self.policy)
 
+        # Step3 调度待运行的请求
         # Next, schedule the WAITING requests.
+        # 没有被抢占的请求 and 有待运行的请求 and 有 token 预算
         if not preempted_reqs:
             while self.waiting and token_budget > 0:
+                # 如果运行队列已满，则终止循环
                 if len(self.running) == self.max_num_running_reqs:
                     break
 
+                # 获取第1个待运行请求
                 request = self.waiting.peek_request()
 
                 # KVTransfer: skip request if still waiting for remote kvs.
@@ -371,8 +424,10 @@ class Scheduler(SchedulerInterface):
                     continue
 
                 num_external_computed_tokens = 0
+                # 控制是否异步加载 KV Cache
                 load_kv_async = False
 
+                # 获取已缓存的 token
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     # Get locally-cached tokens.

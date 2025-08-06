@@ -22,7 +22,14 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-
+"""
+用于在模型运行过程中管理 KV 缓存的异步传输。主要功能包括：
+1. 设置和绑定 KV 连接器：根据调度器输出更新 KV 连接器元数据。
+2. 启动后台 KV 加载：在前向计算上下文中异步加载 KV 缓存。
+3. 等待保存完成：确保 KV 传输完成。
+4. 处理空转时的 KV 传输：即使没有实际推理任务也执行 KV 传输。
+5. 获取传输完成状态：收集已完成的发送和接收请求。
+"""
 # Defined as a kv connector functionality mixin for ModelRunner (GPU, TPU)
 class KVConnectorModelRunnerMixin:
 
