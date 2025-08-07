@@ -265,6 +265,17 @@ class FreeKVCacheBlockQueue:
     Args:
         blocks: A list of KVCacheBlock objects.
     """
+    """
+    这个类将 KVCacheBlock 对象列表组织成一个空闲块的双向链表
+    我们实现这个类而不是使用Python内置的deque，是为了支持在队列中间以 O(1) 时间移除块
+    为了缩小与C++实现的内置deque的性能差距，这个类在操作链表时不分配任何Python对象
+    相反，这个类直接操作给定块的prev_free_block和next_free_block属性。
+    
+    队列最初按块ID排序。当一个块被分配然后被释放时，它会按照驱逐顺序重新添加回来：
+    1. 最近最少使用的块在前面（LRU）
+    2. 如果两个块有相同的最后访问时间（由相同序列分配），则具有更多哈希令牌（块链的尾部）的块在前面。
+    注意，我们通过在释放请求块时反转块顺序来维护这个顺序。这个操作在该类之外进行。
+    """
 
     def __init__(self, blocks: list[KVCacheBlock]) -> None:
         self.num_free_blocks = len(blocks)
@@ -302,6 +313,7 @@ class FreeKVCacheBlockQueue:
         Returns:
             The first free block.
         """
+        """从 chain 的左侧取出第1个 block"""
         if (self.fake_free_list_head.next_free_block
                 is self.fake_free_list_tail
                 or self.fake_free_list_head.next_free_block is None):
@@ -338,6 +350,7 @@ class FreeKVCacheBlockQueue:
         Returns:
             A list of n free blocks.
         """
+        """从 chain 的左侧取出前n个 block"""
         if n == 0:
             return []
         assert self.num_free_blocks >= n
@@ -368,6 +381,7 @@ class FreeKVCacheBlockQueue:
         Args:
             block: The block to remove.
         """
+        """删除1个block"""
         if block.prev_free_block is None or block.next_free_block is None:
             # This should not happen if the block is from the free list.
             # It indicates a bug in the caller's logic.
@@ -389,6 +403,7 @@ class FreeKVCacheBlockQueue:
         Args:
             block: The block to append.
         """
+        """添加1个 block 至队列最后"""
         if self.fake_free_list_tail.prev_free_block is None:
             raise RuntimeError(
                 "prev_free_block of fake_free_list_tail should always exist")
@@ -410,6 +425,7 @@ class FreeKVCacheBlockQueue:
         Args:
             blocks: The blocks to append.
         """
+        """添加n个 block 至队列最后"""
         if len(blocks) == 0:
             return
         self.num_free_blocks += len(blocks)

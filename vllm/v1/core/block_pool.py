@@ -31,9 +31,14 @@ class BlockPool:
     """
     """
     BlockPool 用于管理 KVCacheBlocks
-    - 它提供了分配、释放和缓存 kv cache blocks 的方法
-    - free_block_queue: 按驱逐顺序存储空闲块，以支持分配、释放和缓存驱逐
-    - cached_block_hash_to_block: 在块哈希和缓存块之间建立映射，以支持通过块哈希查找缓存块
+    1. 它提供了分配、释放和缓存 kv cache blocks 的方法
+    2. free_block_queue: 按驱逐顺序存储空闲块，以支持分配、释放和缓存驱逐
+    3. cached_block_hash_to_block: 在块哈希和缓存块之间建立映射，以支持通过块哈希查找缓存块
+    
+    Args:
+        num_gpu_blocks: 可用的 block 数量
+        enable_caching: 是否启用 prefix caching.
+        enable_kv_cache_events: 是否启用 kv cache events.
     """
 
     def __init__(
@@ -42,13 +47,18 @@ class BlockPool:
         enable_caching: bool,
         enable_kv_cache_events: bool = False,
     ):
+        # 参数校验与赋值
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
         self.enable_caching = enable_caching
+
+        # 在此处初始化所有的 KV cache block
         # All kv-cache blocks.
         self.blocks: list[KVCacheBlock] = [
             KVCacheBlock(idx) for idx in range(num_gpu_blocks)
         ]
+
+        # 空闲 block 队列
         # Free block queue that constructs and manipulates a doubly linked
         # list of free blocks (including eviction candidates when caching is
         # enabled).
@@ -63,15 +73,27 @@ class BlockPool:
         # if there is already an identical block in the cache. This is because
         # we want to make sure the allocated block IDs won't change so that
         # block tables are append-only.
+        """
+        {block_hash: {block ID: block}}
+        一个 cached block 是一个 full block (token 已满), 它可以用于 prefix caching, 它有一个 block hash 
+        cached block 可能被正在运行的请求使用，也可能位于可能被驱逐的空闲块队列（free_block_queue）中
+        
+        注意：我们目前不对缓存中的块进行去重处理，这意味着如果一个块变满并被缓存，我们不会检查缓存中是否已存在相同的块。这是因为我们希望确保已分配的块ID不会改变，从而使块表保持仅追加（append-only）的特性
+        """
         self.cached_block_hash_to_block: dict[BlockHashWithGroupId, dict[
             int, KVCacheBlock]] = defaultdict(dict)
 
+        """
+        用于表示一个 block ID为0的占位块（placeholder block）。
+        null_block 的引用计数（ref_cnt）不会被维护，在使用时需要特别注意，避免释放它。
+        """
         # To represent a placeholder block with block_id=0.
         # The ref_cnt of null_block is not maintained, needs special care to
         # avoid freeing it.
         self.null_block = self.free_block_queue.popleft()
         self.null_block.is_null = True
 
+        # KV Cache event 相关 (分布式环境需要)
         self.enable_kv_cache_events = enable_kv_cache_events
         self.kv_event_queue: list[KVCacheEvent] = []
 
@@ -89,14 +111,28 @@ class BlockPool:
         Returns:
             The cached blocks if exists, or None.
         """
+        """
+        获取 cached block
+        
+        Args:
+            block_hash          要查找的 block hash 值
+            kv_cache_group_ids  kv cache groups
+        """
+        # Step1 定义返回值
         cached_blocks = []
+        # Step2 遍历每个 group
         for group_id in kv_cache_group_ids:
+            # 1. 获取 cached block
             cached_blocks_one_group = self.cached_block_hash_to_block.get(
                 BlockHashWithGroupId(block_hash, group_id))
+            # 2. 如果找不到, 直接返回 None
             if not cached_blocks_one_group:
                 return None
+            # 3. 如果有重复的, 取第1个
             first_block = next(iter(cached_blocks_one_group.values()))
             cached_blocks.append(first_block)
+
+        # Step3 执行返回
         return cached_blocks
 
     def cache_full_blocks(
