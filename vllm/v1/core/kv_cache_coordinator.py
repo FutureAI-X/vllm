@@ -16,6 +16,7 @@ class KVCacheCoordinator(ABC):
     """
     Coordinate the KV cache of different KV cache groups.
     """
+    """协调不同 KV Cache Group 的 KV Cache"""
 
     def __init__(
         self,
@@ -26,6 +27,17 @@ class KVCacheCoordinator(ABC):
         caching_hash_fn: Callable,
         enable_kv_cache_events: bool,
     ):
+        """
+        初始化方法
+
+        Args:
+            kv_cache_config         KV Cache Config
+            max_model_len           模型最大长度
+            use_eagle               是否使用 eagle
+            enable_caching          是否启用 prefix caching
+            caching_hash_fn         缓存哈希计算函数
+            enable_kv_cache_events  是否启用 KV Cache Event
+        """
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
         self.enable_caching = enable_caching
@@ -210,6 +222,10 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
     case for models with only one KV cache type, e.g., all attention layers use
     full attention or all attention layers use sliding window attention.
     """
+    """
+    用于只有 1个 KV Cache Group 的 KV Cache Coordinator
+    这种情况适用于只有一种 KV 缓存类型的模型，例如所有注意力层都使用全注意力或所有注意力层都使用滑动窗口注意力
+    """
 
     def __init__(self, kv_cache_config: KVCacheConfig, max_model_len: int,
                  use_eagle: bool, enable_caching: bool,
@@ -228,6 +244,8 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+        """查找命中缓存的最大长度"""
+        # 获取命中的 Block
         hit_blocks = self.single_type_managers[0].find_longest_cache_hit(
             block_hashes=block_hashes,
             max_length=max_cache_hit_length,
@@ -388,15 +406,36 @@ def get_kv_cache_coordinator(
         kv_cache_config: KVCacheConfig, max_model_len: int, use_eagle: bool,
         enable_caching: bool, caching_hash_fn: Callable,
         enable_kv_cache_events: bool) -> KVCacheCoordinator:
+    """根据配置返回不同的 KV Cache Coordinator (协调器)
+
+    Args:
+
+    Returns:
+        1. KVCacheCoordinatorNoPrefixCache
+            - 用于禁用前缀缓存的场景
+            - 提供最基本的 KV Cache 管理功能
+            - 不支持前缀缓存相关特性
+        2. UnitaryKVCacheCoordinator
+            - 用于单一类型 KV Cache 的模型
+            - 简化处理逻辑，性能更优
+            - 例如：所有层都使用全注意力的模型
+        3. HybridKVCacheCoordinator
+            - 用于混合类型 KV Cache 的模型
+            - 协调不同类型的注意力机制
+            - 处理复杂的缓存匹配逻辑
+    """
+    # 如果未启用前缀缓存
     if not enable_caching:
         return KVCacheCoordinatorNoPrefixCache(kv_cache_config, max_model_len,
                                                use_eagle, caching_hash_fn,
                                                enable_kv_cache_events)
+    # 如果缓存组数量为1
     if len(kv_cache_config.kv_cache_groups) == 1:
         return UnitaryKVCacheCoordinator(kv_cache_config, max_model_len,
                                          use_eagle, enable_caching,
                                          caching_hash_fn,
                                          enable_kv_cache_events)
+    # 默认返回
     return HybridKVCacheCoordinator(kv_cache_config, max_model_len, use_eagle,
                                     enable_caching, caching_hash_fn,
                                     enable_kv_cache_events)

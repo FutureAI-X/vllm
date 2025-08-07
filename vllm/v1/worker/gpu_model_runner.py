@@ -3008,12 +3008,26 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             KVCacheSpec: A dictionary mapping layer names to their KV cache
             format. Layers that do not need KV cache are not included.
         """
+        """
+        通过解析静态前向上下文中的每个 Attention 模块的 KV 缓存格式来生成 KVCacheSpec
+        
+        Returns:
+            KVCacheSpec：一个将层名称映射到其 KV 缓存格式的字典。不需要 KV 缓存的层不包含在内。
+        """
 
+        # Step1 初始化
+        # 1. block 存储的 token 数
         block_size = self.vllm_config.cache_config.block_size
+        # 2. 是否使用 MLA(Multi-head Latent Attention) 机制
         use_mla = self.vllm_config.model_config.use_mla
+        # 3. 初始化一个字典, 用于存储每层的 KV 缓存规范
         kv_cache_spec: dict[str, KVCacheSpec] = {}
+        # 4. 获取所有的 Attention Layer
         attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
+
+        # Step2 遍历所有注意力层
         for layer_name, attn_module in attn_layers.items():
+            # 1. 如果当前分层设置了 KV 共享层, 则该层不需要自己 KV 缓存, 而是使用目标层的缓存
             if (kv_tgt_layer :=
                     attn_module.kv_sharing_target_layer_name) is not None:
                 # The layer doesn't need its own KV cache and will use that of
@@ -3066,14 +3080,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 raise ValueError(
                     f"Unknown attention type: {attn_module.attn_type}")
 
+        # Step3 获取所有 Mamba 层
         mamba_layers = get_layers_from_vllm_config(self.vllm_config, MambaBase)
         if len(mamba_layers) > 0:
+            # 1. 兼容性检查
             if self.vllm_config.speculative_config is not None:
                 raise NotImplementedError(
                     "Mamba with speculative decoding is not supported yet.")
             if self.vllm_config.cache_config.enable_prefix_caching:
                 raise NotImplementedError(
                     "Prefix caching is not supported for Mamba yet.")
+
+            # 2. 进行相关设置
             max_model_len = self.vllm_config.model_config.max_model_len
 
             page_size_padded = (

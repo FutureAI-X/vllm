@@ -149,6 +149,11 @@ class KVCacheManager:
         # Mapping from request ID to kv block hashes.
         # This is to avoid recomputing the block hashes for each call of
         # `get_computed_blocks` or `allocate_slots`.
+        """
+        一个 dict/map, 维护了每个 request_id 到 多个 KV Block Hash 的映射
+        dict[request_id -> list[BlockHash]]
+        此属性存在的目的是为了避免在调用 get_computed_blocks 与 allocate_slots 时重新计算 block hashes
+        """
         self.req_to_block_hashes: defaultdict[
             str, list[BlockHash]] = defaultdict(list)
 
@@ -187,7 +192,7 @@ class KVCacheManager:
                 - The number of computed tokens.
         """
         """
-        获取请求已计算(缓存)的 blocks, 注意必须是完整的块
+        从本地缓存中获取请求已计算(缓存)的 blocks, 注意必须是完整的块
         
         Args:
             request: 要计算的请求
@@ -196,48 +201,62 @@ class KVCacheManager:
             - 请求已计算的 blocks list
             - 已计算的令牌数
         """
-        # Prefix caching is disabled or
-        # When the request requires prompt logprobs, we skip prefix caching.
-        # 如果满足任一条件, 则跳过前缀缓存, 返回空
+        # Step1 是否跳转前缀缓存判断
+        # 如果满足任一条件, 则跳过前缀缓存查找, 返回空
         # 1. 禁用了前缀缓存
         # 2. 请求需要 prompt logprobs
+        # Prefix caching is disabled or
+        # When the request requires prompt logprobs, we skip prefix caching.
         if (not self.enable_caching
                 or (request.sampling_params is not None
                     and request.sampling_params.prompt_logprobs is not None)):
             return self.create_empty_block_list(), 0
 
+        # Step2 获取 request 的 Block 的 Hash
+        # 1. 根据 request_id 获取已缓存的 Block Hash: 如果此 request 之前尝试过调度，则从 req_to_block_hashes 中获取
         # The block hashes for the request may already be computed
         # if the scheduler has tried to schedule the request before.
-        # 尝试从缓存中获取请求的块哈希值
         block_hashes = self.req_to_block_hashes[request.request_id]
-        # 如果没有缓存，则使用 hash_request_tokens 函数计算哈希值并存储到 req_to_block_hashes 中
+
+        # 2. 如果根据 request id 没有找到，则使用 hash_request_tokens 函数计算哈希值并存储到 req_to_block_hashes 中
         if not block_hashes:
+            # 判断 block_size
             assert self.block_size is not None
+            # 计算 block hash
             block_hashes = hash_request_tokens(self.caching_hash_fn,
                                                self.block_size, request)
+            # 更新到 req_to_block_hashes
             self.req_to_block_hashes[request.request_id] = block_hashes
 
+        # Step3 获取已缓存的块
+        """
+        注意:
+        - 当所有令牌都命中缓存时，我们必须重新计算最后一个令牌以获得logits
+        - 因此，将max_cache_hit_length设置为prompt_length - 1
+        - 这可能会触发整个块的重新计算，而不仅仅是单个最后一个令牌, 因为allocate_slots()要求num_computed_tokens与块大小对齐
+        - 移除这个限制可能会在未来略微提升性能
+        """
         # NOTE: When all tokens hit the cache, we must recompute the last token
         # to obtain logits. Thus, set max_cache_hit_length to prompt_length - 1.
         # This can trigger recomputation of an entire block, rather than just
         # the single last token, because allocate_slots() requires
         # num_computed_tokens to be block-size aligned. Removing this limitation
         # could slightly improve performance in the future.
-        # 设置最大缓存命中长度为请求令牌数减1, 这是因为即使所有令牌都命中缓存，也需要重新计算最后一个令牌以获取 logits
+        # 1. 设置最大缓存命中长度为请求令牌数减1, 这是因为即使所有令牌都命中缓存，也需要重新计算最后一个令牌以获取 logits
         max_cache_hit_length = request.num_tokens - 1
-        # 调用协调器的 find_longest_cache_hit 方法查找最长的缓存命中
-        # 返回已计算的块和新计算的令牌数
+        # 2. 调用协调器的 find_longest_cache_hit 方法查找最长的缓存命中 (返回已计算的块和已计算的令牌数)
         computed_blocks, num_new_computed_tokens = (
             self.coordinator.find_longest_cache_hit(block_hashes,
                                                     max_cache_hit_length))
 
-        # 如果启用了统计日志，则更新前缀缓存统计信息
+        # Step4 如果启用了统计日志，则更新前缀缓存统计信息
         if self.log_stats:
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.requests += 1
             self.prefix_cache_stats.queries += request.num_tokens
             self.prefix_cache_stats.hits += num_new_computed_tokens
 
+        # Step5 返回已缓存的块
         return KVCacheBlocks(computed_blocks), num_new_computed_tokens
 
     def allocate_slots(
@@ -284,15 +303,27 @@ class KVCacheManager:
         Returns:
             A list of new allocated blocks.
         """
+        """
+        Args:
+            request: 需要分配槽位的请求对象
+            num_new_tokens: 需要分配的新token数量，包括外部token
+            num_new_computed_tokens: 新命中的前缀缓存token数量
+            new_computed_blocks: 新命中的缓存块
+            num_lookahead_tokens: 需要预分配的推测token数量
+            delay_cache_blocks: 是否延迟缓存块
+        """
+        # Step1 参数验证
         if num_new_tokens == 0:
             raise ValueError("num_new_tokens must be greater than 0")
 
+        # Step2 获取或初始化新的已计算 Block
         if new_computed_blocks is not None:
             new_computed_block_list = new_computed_blocks.blocks
         else:
             new_computed_block_list = tuple(
                 [] for _ in range(len(self.kv_cache_config.kv_cache_groups)))
 
+        # Step3 清理跳过的 Block (如滑动窗口外的 token)
         # Free the blocks that are skipped during the attention computation
         # (e.g., tokens outside the sliding window).
         # We can do this even if we cannot schedule this request due to
@@ -302,6 +333,7 @@ class KVCacheManager:
         self.coordinator.remove_skipped_blocks(request.request_id,
                                                request.num_computed_tokens)
 
+        # Step4 计算总的需要槽位的 token 数量，确保不会超出模型长度
         # The number of computed tokens is the number of computed tokens plus
         # the new prefix caching hits
         num_computed_tokens = (request.num_computed_tokens +
@@ -310,6 +342,7 @@ class KVCacheManager:
             num_computed_tokens + num_new_tokens + num_lookahead_tokens,
             self.max_model_len)
 
+        # Step5 计算需要分配的 Block 数量
         num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
             request_id=request.request_id,
             num_tokens=num_tokens_need_slot,
@@ -320,6 +353,8 @@ class KVCacheManager:
             # Cannot allocate new blocks
             return None
 
+        # Step5 前缀缓存的处理
+        # 如果启用 prefix caching, 则标记已计算的块防止被驱逐
         # Touch the computed blocks to make sure they won't be evicted.
         if self.enable_caching:
             self.block_pool.touch(new_computed_block_list)
@@ -328,19 +363,24 @@ class KVCacheManager:
                 "Computed blocks should be empty when "
                 "prefix caching is disabled")
 
+        # 将新计算的块保存到请求块中
         # Append the new computed blocks to the request blocks until now to
         # avoid the case where the new blocks cannot be allocated.
         self.coordinator.save_new_computed_blocks(request.request_id,
                                                   new_computed_block_list)
 
+        # Step6 分配新的 Block
         new_blocks = self.coordinator.allocate_new_blocks(
             request.request_id, num_tokens_need_slot)
 
+        # Step7 缓存处理和返回结果
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.
+        # 如果不启用缓存或需要延迟缓存，则直接返回新分配的块
         if not self.enable_caching or delay_cache_blocks:
             return KVCacheBlocks(new_blocks)
 
+        # 缓存已确认的token，排除可能被拒绝的推测token
         # NOTE(woosuk): We want to commit (cache) up to num_computed_tokens +
         # num_new_tokens, but must exclude "non-committable" tokens (e.g.,
         # draft tokens that could be rejected). Therefore, we cap the number

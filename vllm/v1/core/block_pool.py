@@ -29,6 +29,12 @@ class BlockPool:
         enable_caching: Whether to enable prefix caching.
         enable_kv_cache_events: Whether to enable kv cache events.
     """
+    """
+    BlockPool 用于管理 KVCacheBlocks
+    - 它提供了分配、释放和缓存 kv cache blocks 的方法
+    - free_block_queue: 按驱逐顺序存储空闲块，以支持分配、释放和缓存驱逐
+    - cached_block_hash_to_block: 在块哈希和缓存块之间建立映射，以支持通过块哈希查找缓存块
+    """
 
     def __init__(
         self,

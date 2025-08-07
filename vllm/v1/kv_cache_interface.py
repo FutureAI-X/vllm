@@ -21,6 +21,7 @@ class KVCacheSpec:
     """
     A base class for specifying the KV cache format of one layer.
     """
+    """指定一层 KV Cache 缓存格式的基类"""
 
     # number of tokens in a block
     block_size: int
@@ -230,13 +231,21 @@ class KVCacheConfig:
     """
     """The number of KV cache blocks"""
     num_blocks: int
+
     """How should model runner initialize the KV cache tensors for each layer"""
     kv_cache_tensors: list[KVCacheTensor]
+
     """
     The kv cache groups of the model.
     For models with only one type of attention, there is only one group that
     contains all layers.
     For models with multiple types of attention, there will be multiple groups,
     see `_get_kv_cache_config_uniform_page_size` for more details.
+    """
+    """
+    模型的 KV Cache Group
+    - 如果模型只有1种 Attention, 只有1个组, 该组包含全部的 layer
+    - 如果模型有多种 Attention, 将会有多个组
+    - 更多细节参考 _get_kv_cache_config_uniform_page_size 方法
     """
     kv_cache_groups: list[KVCacheGroupSpec]

@@ -28,14 +28,46 @@ class BlockHash(NamedTuple):
     hash collisions are practically impossible.
     """
     """
-    块的哈希值（整数）、块中的 token ID 以及额外的键。 
-    我们保留 token ID 和额外键的元组，以减少当哈希值相同时发生哈希冲突的可能性。
+    Block 的 Hash Value（int）、Block 中的 token ID 以及 额外的键。 
+    我们保留 token ID 的元组 和额外键，以减少当哈希值相同时发生哈希冲突的可能性。
     然而，通过使用 SHA256，哈希冲突在实际中是不可能发生的。
+    
+    关于 tuple 的说明, 以及为和不用 list
+    1. 不可变性
+    ```
+        # tuple 是不可变的
+        token_ids: tuple[int, ...] = (1, 2, 3)
+        # token_ids[0] = 4  # 这会引发 TypeError
+        
+        # list 是可变的
+        token_ids_list: list[int] = [1, 2, 3]
+        token_ids_list[0] = 4  # 这是允许的
+    ```
+    
+    2. 哈希能力
+    元组是可哈希的，可以作为字典的键或集合的元素，而列表不行
+    ```
+        # tuple 可以作为字典的键
+        block_hash_map: dict[tuple[int, ...], str] = {}
+        token_ids: tuple[int, ...] = (1, 2, 3)
+        block_hash_map[token_ids] = "block_1"
+        
+        # list 不能作为字典的键
+        token_ids_list: list[int] = [1, 2, 3]
+        # block_hash_map[token_ids_list] = "block_1"  # 会引发 TypeError
+    ```
+
     """
+
+    # Block 的 Hash Value (Integer 类型)
     # Hash value of the block in an integer.
     hash_value: int
+
+    # Block 存储的 token ids
     # Token IDs in the block.
     token_ids: tuple[int, ...]
+
+    # Block 额外的 key
     # Extra keys for the block.
     extra_keys: Optional[Any] = None
 
@@ -84,6 +116,12 @@ class PrefixCachingMetrics:
     Args:
         max_recent_requests: The number of the max recent requests to aggregate.
             Defaults to 1000.
+    """
+    """
+    Prefix caching 的指标: 最近N个请求的命中率
+    
+    Args:
+        max_recent_requests: 要聚合的最大最近请求数量, 默认为 1000
     """
 
     def __init__(self, max_recent_requests: int = 1000):
@@ -182,6 +220,10 @@ class KVCacheBlock:
 
     def reset_hash(self):
         """Reset the block hash when the block is evicted."""
+        """当Block被驱逐/移除时, 重置 Hash Value
+        
+        当缓存空间不足时，某些块会被"驱逐"（evicted）出缓存以腾出空间给新的内容
+        """
         self._block_hash = None
 
     def __repr__(self) -> str:
@@ -557,10 +599,31 @@ def hash_block_tokens(
         The hash value of the block and the token ids in the block.
         The entire tuple is used as the hash key of the block.
     """
+    """
+    计算 Block 的 Hash Value, 根据当前 Block 的内容和 前一 Block 的内容
+    - Hash Value 用于前缀缓存 (prefix caching)
+    - 我们对此函数使用LRU缓存，以避免对相同块内容重新计算哈希值
+    
+    Args:
+        parent_block_hash: 父块的哈希值。如果是第一个块则为None。
+        curr_block_token_ids: 当前块中的token ID列表。假设当前块是完整的。
+        extra_keys: 块的额外键
+        
+    Return：
+        块的哈希值和块中的token ID
+        被用作 Block Hash Key 的实体元组
+        
+    关于 LRU Cache 的说明:
+        LRU Cache（Least Recently Used Cache）是一种常用的缓存淘汰策略, 当缓存满了需要腾出空间时，LRU会淘汰最长时间未被访问的数据
+    """
+    # 1. 如果是第一个 Block 特殊处理
     if not parent_block_hash:
         parent_block_hash = NONE_HASH
 
+    # 2. 将 token ids 转换为 tuple
     curr_block_token_ids_tuple = tuple(curr_block_token_ids)
+
+    # 3. 计算 Hash 并返回
     return BlockHash(
         hash_function(
             (parent_block_hash, curr_block_token_ids_tuple, extra_keys)),
@@ -579,37 +642,50 @@ def hash_request_tokens(hash_function: Any, block_size: int,
     Returns:
         The list of computed hash values.
     """
-    # 获取请求的全部 token
+    """
+    根据一个 sequence 的 token ids, 计算一系列 block 的 hash value, hash value 用于 prefix caching (前缀缓存)
+    """
+    # Step1 前置准备
+    # 1. 获取请求的全部 token
     token_ids = request.all_token_ids
 
-    #是否需要额外键: 多模态、LoRA等
+    # 2. 是否需要额外 key: 多模态、LoRA等
     req_need_extra_keys = need_extra_keys(request)
     req_extra_keys = None
     curr_mm_idx = 0
 
+    # 3. 定义结果数组
     ret = []
+
+    # 4. 临时变量: 在循环中记录前一个块的 hash 值
     parent_block_hash_value = None
+
+    # Step2 循环计算 block hash
     # 将输入 token 按照 block_size 分块
+    # range(start, stop, step), 含 start 但是不含 stop
     # Only full blocks will be hashed
     for start in range(0, len(token_ids) - block_size + 1, block_size):
-        # 获取此块的 token
+        # 1. 获取当前块的 token
         end = start + block_size
+        # Python 切片操作不会包含 end
         block_token_ids = token_ids[start:end]
 
-        # 是否需要额外参数
+        # 2. 判断是否需要额外参数
         if req_need_extra_keys:
             # MM and LoRA requests need extra keys for block-hash computation.
             req_extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
                 request, start, end, curr_mm_idx)
 
-        # 计算 block hash
+        # 3. 计算 block hash
         block_hash = hash_block_tokens(hash_function, parent_block_hash_value,
                                        block_token_ids, req_extra_keys)
-        # 添加到返回结果中
+        # 4. 添加到返回结果中
         ret.append(block_hash)
-        # 更新 parent_block_hash_value, 供下一块使用
+
+        # 5. 更新 parent_block_hash_value, 供下一块计算 hash 使用
         parent_block_hash_value = block_hash.hash_value
-    # 执行返回
+
+    # Step3 执行返回
     return ret
 
 
