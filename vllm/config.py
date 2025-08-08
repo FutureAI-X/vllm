@@ -556,13 +556,15 @@ class ModelConfig:
     from `AutoProcessor.from_pretrained`. The available overrides depend on the
     model that is being run. For example, for Phi-3-Vision: `{"num_crops": 4}`.
     """
-    """转发给模型多模态处理器的参数"""
+    mm_processor_cache_gb: int = 4
+    """The size (in GiB) of the multi-modal processor cache, which is used to
+    avoid re-processing past multi-modal inputs.
 
-    disable_mm_preprocessor_cache: bool = False
-    """If `True`, disable caching of the multi-modal preprocessor/mapper (not
-    recommended)."""
-    """如为 True，禁用多模态预处理器/映射器的缓存（不推荐）"""
+    This cache is duplicated for each API process and engine core process,
+    resulting in a total memory usage of
+    `mm_processor_cache_gb * (api_server_count + data_parallel_size)`.
 
+    Set to `0` to disable this cache completely (not recommended)."""
     override_neuron_config: dict[str, Any] = field(default_factory=dict)
     """Initialize non-default neuron config or override default neuron config
     that are specific to Neuron devices, this argument will be used to
@@ -3243,12 +3245,6 @@ class SpeculativeConfig:
         hash_str = hashlib.md5(str(factors).encode(),
                                usedforsecurity=False).hexdigest()
         return hash_str
-
-    @classmethod
-    def from_dict(cls, dict_value: dict) -> "SpeculativeConfig":
-        """Parse the CLI value for the speculative config."""
-        """从 speculative config 解析类配置"""
-        return cls(**dict_value)
 
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
