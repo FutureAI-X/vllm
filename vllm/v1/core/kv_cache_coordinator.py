@@ -38,6 +38,7 @@ class KVCacheCoordinator(ABC):
             caching_hash_fn         缓存哈希计算函数
             enable_kv_cache_events  是否启用 KV Cache Event
         """
+        # 属性赋值
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
         self.enable_caching = enable_caching
@@ -46,8 +47,11 @@ class KVCacheCoordinator(ABC):
         self.block_pool = BlockPool(kv_cache_config.num_blocks, enable_caching,
                                     enable_kv_cache_events)
 
+        # 如果启用了 eagle 在 find_longest_cache_hit 需要特殊处理 (丢弃最后一个命中的块)
         # Needs special handling for find_longest_cache_hit if eagle is enabled
         self.use_eagle = use_eagle
+
+        # 初始化 SingleTypeKVCacheManager
         self.single_type_managers = tuple(
             get_manager_for_kv_cache_spec(
                 kv_cache_spec=kv_cache_group.kv_cache_spec,
@@ -73,10 +77,22 @@ class KVCacheCoordinator(ABC):
         Returns:
             The number of blocks.
         """
+        """
+        计算请求需要申请的 BLOCK 数量
+        Args:
+            request_id: 请求ID
+            num_tokens: 请求总的 token 数
+            new_computed_blocks: 命中的 prefix cache 块
+        """
+        # 1. 定义结果变量
         num_blocks_to_allocate = 0
+
+        # 2. 循环处理每一个 kv cache group
         for i, manager in enumerate(self.single_type_managers):
             num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
                 request_id, num_tokens, new_computed_blocks[i])
+
+        # 3. 执行返回
         return num_blocks_to_allocate
 
     def save_new_computed_blocks(
@@ -90,6 +106,14 @@ class KVCacheCoordinator(ABC):
             new_computed_blocks: The new computed blocks just hitting the
                 prefix cache.
         """
+        """
+        添加 request 对应的 computed blocks
+
+        Args:
+            request_id: 请求ID
+            new_computed_blocks: 命中的 prefix cache
+        """
+        # 循环处理每一个 kv cache group
         for i, manager in enumerate(self.single_type_managers):
             manager.save_new_computed_blocks(request_id,
                                              new_computed_blocks[i])
@@ -108,6 +132,13 @@ class KVCacheCoordinator(ABC):
         Returns:
             The new allocated blocks.
         """
+        """
+        为 request 申请新的 block
+
+        Args:
+            num_tokens: 请求的全部token (包含之前已申请 block 的 token)
+        """
+        # 循环处理每一个 kv cache group
         return tuple(
             manager.allocate_new_blocks(request_id, num_tokens)
             for manager in self.single_type_managers)
@@ -122,6 +153,14 @@ class KVCacheCoordinator(ABC):
             block_hashes: The block hashes of the request.
             num_tokens: The total number of tokens that need to be cached 
                 (including tokens that are already cached).
+        """
+        """
+        缓存 request 的 block
+
+        Args:
+            request: 请求
+            block_hashes: 该请求的 block hash list
+            num_tokens: 需要被缓存的 token 数 (包含已缓存的 token)
         """
         for manager in self.single_type_managers:
             manager.cache_blocks(request, block_hashes, num_computed_tokens)
