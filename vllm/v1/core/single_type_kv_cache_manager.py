@@ -19,6 +19,9 @@ class SingleTypeKVCacheManager(ABC):
     An abstract base class for a manager that handle the kv cache management 
     logic of one specific type of attention layer.
     """
+    """
+    这是一个抽象基类, 用于管理 [特定类型 Attention Layer] 的 KV cache 管理逻辑
+    """
 
     def __init__(
         self,
@@ -35,25 +38,45 @@ class SingleTypeKVCacheManager(ABC):
             kv_cache_group_id: The id of the kv cache group of this manager.
             caching_hash_fn: The caching hash function.
         """
+        """
+        Args:
+            kv_cache_spec: KV cache 格式
+            block_pool: block 池
+            kv_cache_group_id: KV cache group Id
+            caching_hash_fn: block 哈希函数
+        """
 
+        # 属性赋值
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
         self.block_pool = block_pool
 
+        """
+        管理每个 request ids 与使用的 block 关系，这样当请求完成时可以释放 block.
+        - 包含命中的 prefix cache block
+        """
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
         # is finished.
         self.req_to_blocks: defaultdict[str,
                                         list[KVCacheBlock]] = defaultdict(list)
 
+        """
+        {req_id: 该请求的缓存块数量}？包含命中的 prefix cache block num，还有其他的吗？
+        用于跟踪每个请求的缓存块数量
+        仅用于跟踪运行中的请求，我们不跟踪被抢占请求的数据
+        """
         # {req_id: The number of cached blocks for this given request}
         # This is used to track the number of cached blocks for each request.
         # This is only used to track the RUNNING requests, we do not track the
         # data for reempted ones.
         self.num_cached_block: dict[str, int] = {}
 
+        # 属性赋值
         self.caching_hash_fn = caching_hash_fn
         self.kv_cache_group_id = kv_cache_group_id
+
+        # 空 block
         self._null_block = block_pool.null_block
 
     def get_num_blocks_to_allocate(
@@ -72,10 +95,25 @@ class SingleTypeKVCacheManager(ABC):
         Returns:
             The number of blocks.
         """
-
+        """
+        计算请求需要申请的 BLOCK 数量
+        Args:
+            request_id: 请求ID
+            num_tokens: 请求总的 token 数
+            new_computed_blocks: 命中的 prefix cache 块
+        """
+        # 1. 计算 request 需要的 [总 block num]
         num_required_blocks = cdiv(num_tokens, self.block_size)
+
+        # 2. 计算需要新申请的 block num
         num_new_blocks = (num_required_blocks - len(new_computed_blocks) -
                           len(self.req_to_blocks[request_id]))
+        # 3. 计算被驱逐的块数
+        """
+        如果命中的 computed block 是在 free queue 且 ref_cnt 为0
+        当请求被分配时，它将从空闲块变为已计算块
+        所以我们也将其计为需要分配的块
+        """
         # If a computed block of a request is an eviction candidate (in the
         # free queue and ref_cnt == 0), it will be changed from a free block
         # to a computed block when the request is allocated, so we also count
@@ -83,6 +121,8 @@ class SingleTypeKVCacheManager(ABC):
         num_evictable_computed_blocks = sum(
             blk.ref_cnt == 0 and not blk.is_null
             for blk in new_computed_blocks)
+
+        # 4. 计算结果
         return num_new_blocks + num_evictable_computed_blocks
 
     def save_new_computed_blocks(
@@ -96,13 +136,27 @@ class SingleTypeKVCacheManager(ABC):
             new_computed_blocks: The new computed blocks just hitting the
                 prefix cache.
         """
+        """
+        添加 request 对应的 computed blocks
+        
+        Args:
+            request_id: 请求ID
+            new_computed_blocks: 命中的 prefix cache
+        """
         if request_id not in self.num_cached_block:
+            # 一个新的请求
             # A new request.
+            # 1. 向 req_to_blocks 增加此 request
             req_blocks = self.req_to_blocks[request_id]
             assert len(req_blocks) == 0
+
+            # 2. 扩展 new_computed_block
             req_blocks.extend(new_computed_blocks)
+
+            # 3. 记录 request 缓存块数量
             self.num_cached_block[request_id] = len(new_computed_blocks)
         else:
+            # 运行中的请求, 不应该存在 new_computed block
             # A running request. Should not have new computed blocks.
             assert len(new_computed_blocks) == 0
 
@@ -120,14 +174,29 @@ class SingleTypeKVCacheManager(ABC):
         Returns:
             The new allocated blocks.
         """
+
+        """
+        为 request 申请新的 block
+        
+        Args:
+            num_tokens: 请求的全部token (包含之前已申请 block 的 token)
+        """
+        # 1. 获取该请求已有的 block
         req_blocks = self.req_to_blocks[request_id]
+        # 2. 计算该请求需要的 [总 block num]
         num_required_blocks = cdiv(num_tokens, self.block_size)
+        # 3. 获取该请求需要 [申请的 block num]
         num_new_blocks = num_required_blocks - len(req_blocks)
+        # 4. 申请 block
         if num_new_blocks <= 0:
+            # 无需申请
             return []
         else:
+            # 申请新的 block
             new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
+            # 更新请求已有的 block 清单
             req_blocks.extend(new_blocks)
+            # 返回新申请的 blocks
             return new_blocks
 
     def cache_blocks(self, request: Request, block_hashes: list[BlockHash],
@@ -141,9 +210,19 @@ class SingleTypeKVCacheManager(ABC):
             num_tokens: The total number of tokens that need to be cached 
                 (including tokens that are already cached).
         """
+        """
+        缓存 request 的 block
+        
+        Args:
+            request: 请求
+            block_hashes: 该请求的 block hash list
+            num_tokens: 需要被缓存的 token 数 (包含已缓存的 token)
+        """
+        # 1. 获取请求已缓存的 block num
         num_cached_blocks = self.num_cached_block[request.request_id]
+        # 2. 计算请求的 [总 block num]
         num_full_blocks = num_tokens // self.block_size
-
+        # 3. 缓存 block
         self.block_pool.cache_full_blocks(
             request=request,
             blocks=self.req_to_blocks[request.request_id],
@@ -154,7 +233,7 @@ class SingleTypeKVCacheManager(ABC):
             kv_cache_group_id=self.kv_cache_group_id,
             hash_fn=self.caching_hash_fn,
         )
-
+        # 4. 更新请求已缓存的 block num
         self.num_cached_block[request.request_id] = num_full_blocks
 
     def free(self, request_id: str) -> None:
@@ -164,14 +243,19 @@ class SingleTypeKVCacheManager(ABC):
         Args:
             request_id: The request ID.
         """
+        # 1. 获取该请求的所有 block
         # Default to [] in case a request is freed (aborted) before alloc.
         req_blocks = self.req_to_blocks.pop(request_id, [])
 
+        # 2. 反转
         # Free blocks in reverse order so that the tail blocks are
         # freed first.
         ordered_blocks = reversed(req_blocks)
 
+        # 3. 执行 block free
         self.block_pool.free_blocks(ordered_blocks)
+
+        # 4. 删除该请求已缓存的 block num
         self.num_cached_block.pop(request_id, None)
 
     @abstractmethod
@@ -189,6 +273,12 @@ class SingleTypeKVCacheManager(ABC):
         Returns:
             The number of common prefix blocks for all requests in the RUNNING
                 state.
+        """
+        """
+        获取所有 RUNNING request 的公共 prefix block 数量
+        
+        Args:
+            num_running_requests: 处于 running 状态的 request 总数
         """
 
         raise NotImplementedError
@@ -231,6 +321,26 @@ class SingleTypeKVCacheManager(ABC):
             ([NULL, NULL, KVCacheBlock(7), KVCacheBlock(8)]) for block size 4
             and sliding window 8 and len(kv_cache_group_ids) = 1.
         """
+        """
+        获取不超过[max_length]的最长缓存命中前缀块。该前缀应该是[kv_cache_group_ids]中所有KV缓存组的公共前缀命中。
+        如果未找到缓存命中，则返回空列表。
+        如果启用了eagle，则丢弃最后一个匹配的块，以强制重新计算最后一个块，从而获得eagle草稿头所需的隐藏状态。
+        需要为每种注意力类型进行自定义。
+        
+        Args:
+            block_hashes: 请求的块哈希。
+            max_length: 缓存命中前缀的最大长度。
+            kv_cache_group_ids: KV缓存组的ID。
+            block_pool: 块池。
+            kv_cache_spec: KV缓存规范。
+            use_eagle: 是否使用eagle。
+        
+        Returns:
+            一个缓存块列表，其中跳过的块被null块替换，针对[kv_cache_group_ids](file:///home/guoteng/code/vllm/vllm/v1/core/single_type_kv_cache_manager.py#L299-L299)中的每个KV缓存组。
+            返回一个长度为[len(kv_cache_group_ids)](file:///home/guoteng/code/vllm/vllm/v1/core/single_type_kv_cache_manager.py#L299-L299)的列表，其中第i个元素是[kv_cache_group_ids](file:///home/guoteng/code/vllm/vllm/v1/core/single_type_kv_cache_manager.py#L299-L299)中第i个KV缓存组的缓存块列表。
+            例如，滑动窗口管理器应该返回类似([NULL, NULL, KVCacheBlock(7), KVCacheBlock(8)])的列表，其中块大小为4，滑动窗口为8，len(kv_cache_group_ids) = 1。
+
+        """
 
         raise NotImplementedError
 
@@ -245,6 +355,11 @@ class SingleTypeKVCacheManager(ABC):
         Args:
             request_id: The request ID.
             num_computed_tokens: The number of tokens that have been computed.
+        """
+        """
+        从 blocks 中移除不再需要的块并 free
+        - 移除的块应该被null_block替换
+        - 需要为每种注意力类型进行自定义
         """
         raise NotImplementedError
 
@@ -261,26 +376,36 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
     ) -> tuple[list[KVCacheBlock], ...]:
+        # 1. 校验
         assert isinstance(
             kv_cache_spec, (FullAttentionSpec, ChunkedLocalAttentionSpec)
         ), "FullAttentionManager can only be used for full attention " \
             "and chunked local attention groups"
+        # 2. 初始化结果变量
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(len(kv_cache_group_ids)))
+        # 3. 最长请求块
         max_num_blocks = max_length // kv_cache_spec.block_size
+        # 4. 循环处理每一个 block hash
         for block_hash in itertools.islice(block_hashes, max_num_blocks):
             # block_hashes is a chain of block hashes. If a block hash is not
             # in the cached_block_hash_to_id, the following block hashes are
             # not computed yet for sure.
+            # 根据 block hash 和 kv_cache_group_ids 获取缓存的块
             if cached_block := block_pool.get_cached_block(
                     block_hash, kv_cache_group_ids):
+                # 将缓存的块添加到 computed_blocks 中
                 for computed, cached in zip(computed_blocks, cached_block):
                     computed.append(cached)
             else:
                 break
+
+        # 5. 如果启用 eagle，则丢弃每一个 kv cache group 中最后一个匹配的块
         if use_eagle and computed_blocks[0]:
             for computed in computed_blocks:
                 computed.pop()
+
+        # 6. 返回
         return computed_blocks
 
     def remove_skipped_blocks(self, request_id: str,
@@ -290,13 +415,24 @@ class FullAttentionManager(SingleTypeKVCacheManager):
 
     def get_num_common_prefix_blocks(self, request_id: str,
                                      num_running_requests: int) -> int:
+        """
+        获取所有 RUNNING request 的公共 prefix block 数量
+
+        Args:
+            num_running_requests: 处于 running 状态的 request 总数
+        """
+        # 1. 获取此 request 的所有 blocks
         blocks = self.req_to_blocks[request_id]
+        # 2. 定义结果变量
         num_common_blocks = 0
+        # 3. 依次循环 blocks
         for block in blocks:
+            # 如果 block 引用次数与 运行中的请求数相同，则计数器+1
             if block.ref_cnt == num_running_requests:
                 num_common_blocks += 1
             else:
                 break
+        # 4. 执行返回
         return num_common_blocks
 
 
@@ -559,7 +695,9 @@ class MambaManager(SingleTypeKVCacheManager):
             "MambaManager should only allocate 1 block for each request.")
         return new_blocks
 
-
+"""
+一个字典, 特定的 KV cache 格式 -> KV cache Manager
+"""
 spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
     FullAttentionSpec: FullAttentionManager,
     SlidingWindowSpec: SlidingWindowManager,
@@ -570,6 +708,12 @@ spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
 
 def get_manager_for_kv_cache_spec(kv_cache_spec: KVCacheSpec,
                                   **kwargs) -> SingleTypeKVCacheManager:
+    """
+    根据参数获取不同类型的 KV Cache Manager
+    """
+    # 1. 获取要使用的 KV Cache Manager 类
     manager_class = spec_manager_map[type(kv_cache_spec)]
+    # 2. 类初始化
     manager = manager_class(kv_cache_spec, **kwargs)
+    # 3. 执行返回
     return manager

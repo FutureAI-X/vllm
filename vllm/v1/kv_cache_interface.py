@@ -21,7 +21,7 @@ class KVCacheSpec:
     """
     A base class for specifying the KV cache format of one layer.
     """
-    """指定一层 KV Cache 缓存格式的基类"""
+    """指定单层 KV Cache 格式的基类"""
 
     # number of tokens in a block
     block_size: int
