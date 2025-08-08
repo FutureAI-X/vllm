@@ -50,6 +50,7 @@ class BlockPool:
         # 参数校验与赋值
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
+        # 是否启用 prefix caching
         self.enable_caching = enable_caching
 
         # 在此处初始化所有的 KV cache block
@@ -471,6 +472,7 @@ class BlockPool:
         Returns:
             The KV cache usage (between 0.0 and 1.0).
         """
+        """获取 KV Cache 使用率"""
         return 1.0 - (self.get_num_free_blocks() / self.num_gpu_blocks)
 
     def take_events(self) -> list[KVCacheEvent]:
@@ -479,8 +481,21 @@ class BlockPool:
         Returns:
             A list of KV cache events.
         """
+        """
+        原子性地获取所有事件并清空队列
+        
+        Returns:
+            KV cache events 事件列表
+        """
+        # 1. 如果未启用 KV cache 事件, 则返回空列表
         if not self.enable_kv_cache_events:
             return []
+
+        # 2. 获取所有事件
         events = self.kv_event_queue
+
+        # 3. 清空事件队列
         self.kv_event_queue = []
+
+        # 4. 返回事件
         return events
