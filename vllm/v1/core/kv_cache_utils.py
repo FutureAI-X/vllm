@@ -96,6 +96,7 @@ NONE_HASH: int
 
 
 def init_none_hash(hash_fn: Callable):
+    """初始化NONE对象的hash值, 用于在计算第1个block hash入参中的前一 block hash"""
     global NONE_HASH
 
     hash_seed = os.getenv("PYTHONHASHSEED")

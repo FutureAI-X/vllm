@@ -108,25 +108,34 @@ class KVCacheManager:
         log_stats: bool = False,
         enable_kv_cache_events: bool = False,
     ) -> None:
+        # 模型最大长度
         self.max_model_len = max_model_len
 
+        # 没有 Attention 的 Model 无需 KV cache，因此也没有 prefix cache
         if len(kv_cache_config.kv_cache_groups) == 0:
             # Attention free models don't have kv cache,
             # thus don't need prefix caching.
             enable_caching = False
         self.enable_caching = enable_caching
 
+        # kv cache hash 函数
         self.caching_hash_fn = (
             sha256_cbor_64bit if caching_hash_algo == "sha256_cbor_64bit" else
             sha256 if caching_hash_algo == "sha256" else hash)
         init_none_hash(self.caching_hash_fn)
+
+        # 是否使用 eagle
         self.use_eagle = use_eagle
         self.log_stats = log_stats
+
+        # 监控统计信息
         # FIXME: make prefix cache stats conditional on log_stats
         self.prefix_cache_stats = PrefixCacheStats() if log_stats else None
 
+        # 设置 block_size 大小
         self.block_size: Optional[int] = None
         if self.enable_caching:
+            # 检查所有 kv cache group 的 block_size 是否一致，set函数用于去重
             assert len(
                 set(g.kv_cache_spec.block_size
                     for g in kv_cache_config.kv_cache_groups)
@@ -134,6 +143,7 @@ class KVCacheManager:
             self.block_size = kv_cache_config.kv_cache_groups[
                 0].kv_cache_spec.block_size
 
+        # 获取 kv cache coordinator
         self.coordinator = get_kv_cache_coordinator(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
@@ -142,7 +152,11 @@ class KVCacheManager:
             caching_hash_fn=self.caching_hash_fn,
             enable_kv_cache_events=enable_kv_cache_events,
         )
+
+        # kv cache group 个数
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
+
+        # block pool
         self.block_pool = self.coordinator.block_pool
         self.kv_cache_config = kv_cache_config
 
@@ -164,6 +178,7 @@ class KVCacheManager:
         Returns:
             The KV cache usage (between 0.0 and 1.0).
         """
+        """KV Cache 的使用率"""
         return self.block_pool.get_usage()
 
     def make_prefix_cache_stats(self) -> Optional[PrefixCacheStats]:
@@ -172,6 +187,7 @@ class KVCacheManager:
         Returns:
             The current prefix caching stats, or None if logging is disabled.
         """
+        """获取并重置 Prefix cache 的统计信息"""
         if not self.log_stats:
             return None
         stats = self.prefix_cache_stats
@@ -201,7 +217,7 @@ class KVCacheManager:
             - 请求已计算的 blocks list
             - 已计算的令牌数
         """
-        # Step1 是否跳转前缀缓存判断
+        # Step1 是否跳过前缀缓存判断
         # 如果满足任一条件, 则跳过前缀缓存查找, 返回空
         # 1. 禁用了前缀缓存
         # 2. 请求需要 prompt logprobs
@@ -309,7 +325,7 @@ class KVCacheManager:
             num_new_tokens: 需要分配的新token数量，包括外部token
             num_new_computed_tokens: 新命中的前缀缓存token数量
             new_computed_blocks: 新命中的缓存块
-            num_lookahead_tokens: 需要预分配的推测token数量
+            num_lookahead_tokens: 需要预分配的投机解码token数量
             delay_cache_blocks: 是否延迟缓存块
         """
         # Step1 参数验证
@@ -494,5 +510,6 @@ class KVCacheManager:
 
     def create_empty_block_list(self) -> KVCacheBlocks:
         """Creates a new KVCacheBlocks instance with no blocks."""
+        """创建一个空的 KVCacheBlocks, 并没有实际的块"""
         return KVCacheBlocks(tuple([]
                                    for _ in range(self.num_kv_cache_groups)))
