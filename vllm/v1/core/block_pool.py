@@ -288,12 +288,24 @@ class BlockPool:
         Returns:
             A list of new block.
         """
+        """
+        从 free block pool 中获取 new block，注意此处不会检查 block cache
+        
+        Args:
+            num_blocks: 要分配的 block 个数
+            
+        Returns:
+            new block list
+        """
+        # 1. 检查 free block pool 中是否有足够的 blocks 待分配
         if num_blocks > self.get_num_free_blocks():
             raise ValueError(
                 f"Cannot get {num_blocks} free blocks from the pool")
 
+        # 2. 从 free block pool 中获取 n个 new block
         ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
 
+        # 3. 缓存处理 and 引用计数
         # In order to only iterate the list once, we duplicated code a bit
         if self.enable_caching:
             for block in ret:
@@ -304,6 +316,8 @@ class BlockPool:
             for block in ret:
                 assert block.ref_cnt == 0
                 block.ref_cnt += 1
+
+        # 4. 执行返回
         return ret
 
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
@@ -317,20 +331,34 @@ class BlockPool:
         Returns:
             True if the block is evicted, False otherwise.
         """
+        """
+        [当分配新块时会调用此方法] 如果新分配的 block 缓存在 cached_block_hash_to_block，重置 block hash 并从 cache 中移除 block
+        """
+        # Step1 前置处理
+        # 1. 获取 block hash
         block_hash = block.block_hash
+        # 2. 如果 block hash 为 None, 则不需要处理缓存
         if block_hash is None:
             # The block doesn't have hash, eviction is not needed
             return False
+
+        # Step2 缓存处理
+        # 1. 根据 block hash 从 cache 中获取 block
         blocks_by_id = self.cached_block_hash_to_block.get(block_hash)
+        # 2. 如果 block 不在 cache 中，则不需要处理缓存
         if blocks_by_id is None:
             # block_hash not found in cached_block_hash_to_block,
             # eviction is not needed
             return False
+
+        # 3. 重置 block hash
         block.reset_hash()
+        # 4. 从 cache 中移除 block
         blocks_by_id.pop(block.block_id, None)
         if len(blocks_by_id) == 0:
             del self.cached_block_hash_to_block[block_hash]
 
+        # Step3 分布式 KV Cache Event 处理
         if self.enable_kv_cache_events:
             # FIXME (Chen): Not sure whether we should return `hash_value`
             # or `(hash_value, group_id)` here. But it's fine now because
@@ -338,6 +366,8 @@ class BlockPool:
             # enabled, so there is only one group.
             self.kv_event_queue.append(
                 BlockRemoved(block_hashes=[block_hash.get_hash_value()]))
+
+        # Step4 返回
         return True
 
     def touch(self, blocks: tuple[list[KVCacheBlock], ...]) -> None:
@@ -348,12 +378,17 @@ class BlockPool:
         Args:
             blocks: A list of blocks to touch.
         """
+        """
+        将 block 的引用计数 +1, 并可能从空闲队列中移除该块, 当一个块被具有相同前缀的另一个请求命中时使用此功能
+        """
         for blocks_per_group in blocks:
             for block in blocks_per_group:
                 # ref_cnt=0 means this block is in the free list (i.e. eviction
                 # candidate), so remove it.
+                # 如果ref_cnt=0, 说明该块在空闲队列中, 需要从 free 队列中移除
                 if block.ref_cnt == 0 and not block.is_null:
                     self.free_block_queue.remove(block)
+                # 引用次数 +1
                 block.ref_cnt += 1
 
     def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
@@ -364,10 +399,18 @@ class BlockPool:
             ordered_blocks: A list of blocks to free ordered by their eviction
                 priority.
         """
+        """
+        释放 blocks list，这些块应该按照它们的驱逐优先级排序，其中第一个块将首先被驱逐
+        """
         # Materialize the iterable to allow multiple passes.
+        # 1. 将 Iterable 转换为 list，以便进行多次遍历
         blocks_list = list(ordered_blocks)
+
+        # 2. 遍历 blocks list，将 ref_cnt -1
         for block in blocks_list:
             block.ref_cnt -= 1
+
+        # 3. 将 ref_cnt 为 0 的 block 添加到 free 队列
         self.free_block_queue.append_n([
             block for block in blocks_list
             if block.ref_cnt == 0 and not block.is_null
@@ -382,25 +425,35 @@ class BlockPool:
             bool: True if the prefix cache is successfully reset,
             False otherwise.
         """
+        """
+        此函数可用于RLHF流程中，在权重更新后使前缀缓存失效，或用于重置基准测试的前缀缓存状态
+        """
+        # 获取已使用的块数
         num_used_blocks = self.num_gpu_blocks - self.get_num_free_blocks()
+        # 因为 null block 在取出的时候将 num_free_block - 1, 所以当差值为 1 认为, 所有的块都是 free
         if num_used_blocks != 1:  # The null block is always marked as used
             logger.warning(
                 "Failed to reset prefix cache because some "
                 "blocks (%d) are not freed yet", num_used_blocks - 1)
             return False
 
+        # 清空 cache
         # Remove all hashes so that no new blocks will hit.
         self.cached_block_hash_to_block = defaultdict(dict)
 
+        # 重置 block hash
         # Remove all hashes from all blocks.
         for block in self.blocks:
             block.reset_hash()
 
+        # 日志记录
         logger.info("Successfully reset prefix cache")
 
+        # KV cache event
         if self.enable_kv_cache_events:
             self.kv_event_queue.append(AllBlocksCleared())
 
+        # 执行返回
         return True
 
     def get_num_free_blocks(self) -> int:
@@ -409,6 +462,7 @@ class BlockPool:
         Returns:
             The number of free blocks.
         """
+        """获取 free blocks pool 中的数量"""
         return self.free_block_queue.num_free_blocks
 
     def get_usage(self) -> float:
