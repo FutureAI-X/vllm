@@ -211,7 +211,7 @@ class KVCacheManager:
         从本地缓存中获取请求已计算(缓存)的 blocks, 注意必须是完整的块
         
         Args:
-            request: 要计算的请求
+            request: 要计算的请求 (仅首次调度的请求)
             
         Returns:
             - 请求已计算的 blocks list
@@ -250,7 +250,7 @@ class KVCacheManager:
         - 当所有令牌都命中缓存时，我们必须重新计算最后一个令牌以获得logits
         - 因此，将max_cache_hit_length设置为prompt_length - 1
         - 这可能会触发整个块的重新计算，而不仅仅是单个最后一个令牌, 因为allocate_slots()要求num_computed_tokens与块大小对齐
-        - 移除这个限制可能会在未来略微提升性能
+        - 移除这个限制可能会在未来略微提升性能 假
         """
         # NOTE: When all tokens hit the cache, we must recompute the last token
         # to obtain logits. Thus, set max_cache_hit_length to prompt_length - 1.
@@ -332,7 +332,7 @@ class KVCacheManager:
         if num_new_tokens == 0:
             raise ValueError("num_new_tokens must be greater than 0")
 
-        # Step2 获取或初始化新的已计算 Block
+        # Step2 获取或初始化新的已计算 Block (request 首次调度时，从缓存中命中的 block)
         if new_computed_blocks is not None:
             new_computed_block_list = new_computed_blocks.blocks
         else:

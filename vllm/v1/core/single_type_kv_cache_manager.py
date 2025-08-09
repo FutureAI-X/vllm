@@ -137,7 +137,7 @@ class SingleTypeKVCacheManager(ABC):
                 prefix cache.
         """
         """
-        添加 request 对应的 computed blocks
+        保留 request 的 new computed blocks
         
         Args:
             request_id: 请求ID
