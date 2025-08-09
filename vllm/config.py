@@ -1995,7 +1995,10 @@ class CacheConfig:
     enable_prefix_caching: Optional[bool] = None
     """Whether to enable prefix caching. Disabled by default for V0. Enabled by
     default for V1."""
-    """是否启用前缀缓存。V0默认禁用，V1默认启用"""
+    """是否启用前缀缓存。V0默认禁用，V1默认启用
+    
+    V1默认启用: vllm.engine.arg_utils.EngineArgs._set_default_args_v1
+    """
 
     prefix_caching_hash_algo: PrefixCachingHashAlgo = "builtin"
     """Set the hash algorithm for prefix caching:\n

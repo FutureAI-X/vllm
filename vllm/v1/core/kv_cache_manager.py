@@ -379,24 +379,19 @@ class KVCacheManager:
                 "Computed blocks should be empty when "
                 "prefix caching is disabled")
 
-        # 将新计算的块保存到请求块中
         # Append the new computed blocks to the request blocks until now to
         # avoid the case where the new blocks cannot be allocated.
         self.coordinator.save_new_computed_blocks(request.request_id,
                                                   new_computed_block_list)
 
-        # Step6 分配新的 Block
         new_blocks = self.coordinator.allocate_new_blocks(
             request.request_id, num_tokens_need_slot)
 
-        # Step7 缓存处理和返回结果
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.
-        # 如果不启用缓存或需要延迟缓存，则直接返回新分配的块
         if not self.enable_caching or delay_cache_blocks:
             return KVCacheBlocks(new_blocks)
 
-        # 缓存已确认的token，排除可能被拒绝的推测token
         # NOTE(woosuk): We want to commit (cache) up to num_computed_tokens +
         # num_new_tokens, but must exclude "non-committable" tokens (e.g.,
         # draft tokens that could be rejected). Therefore, we cap the number
@@ -510,6 +505,5 @@ class KVCacheManager:
 
     def create_empty_block_list(self) -> KVCacheBlocks:
         """Creates a new KVCacheBlocks instance with no blocks."""
-        """创建一个空的 KVCacheBlocks, 并没有实际的块"""
         return KVCacheBlocks(tuple([]
                                    for _ in range(self.num_kv_cache_groups)))
