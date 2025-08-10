@@ -413,6 +413,7 @@ class Scheduler(SchedulerInterface):
                         skipped_waiting_requests.prepend_request(request)
                         continue
 
+                # LoRA 相关处理
                 # Check that adding the request still respects the max_loras
                 # constraint.
                 if (self.lora_config and request.lora_request and
@@ -575,6 +576,7 @@ class Scheduler(SchedulerInterface):
 
                 if self.lora_config and request.lora_request:
                     scheduled_loras.add(request.lora_request.lora_int_id)
+                # 此处实际是该 request 的所有 block id
                 req_to_new_block_ids[request.request_id] = (
                     self.kv_cache_manager.get_block_ids(request.request_id))
                 num_scheduled_tokens[request.request_id] = num_new_tokens
