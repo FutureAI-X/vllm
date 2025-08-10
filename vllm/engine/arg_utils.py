@@ -39,6 +39,7 @@ from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_ray_initialized
 from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
+from vllm.transformers_utils.config import is_interleaved
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
                         GiB_bytes, get_ip, is_in_ray_actor)
@@ -178,17 +179,8 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
         kwargs[name] = {"default": default, "help": help}
 
         # Set other kwargs based on the type hints
-        json_tip = """Should either be a valid JSON string or JSON keys
-passed individually. For example, the following sets of arguments are
-equivalent:
-
-- `--json-arg '{"key1": "value1", "key2": {"key3": "value2"}}'`\n
-- `--json-arg.key1 value1 --json-arg.key2.key3 value2`
-
-Additionally, list elements can be passed individually using `+`:
-
-- `--json-arg '{"key4": ["value3", "value4", "value5"]}'`\n
-- `--json-arg.key4+ value3 --json-arg.key4+='value4,value5'`"""
+        json_tip = ("Should either be a valid JSON string or JSON keys passed "
+                    "individually.")
         if dataclass_cls is not None:
 
             def parse_dataclass(val: str, cls=dataclass_cls) -> Any:
@@ -933,7 +925,7 @@ class EngineArgs:
             use_async_output_proc=not self.disable_async_output_proc,
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
-            disable_mm_preprocessor_cache=self.disable_mm_preprocessor_cache,
+            mm_processor_cache_gb=self.mm_processor_cache_gb,
             override_neuron_config=self.override_neuron_config,
             override_pooler_config=self.override_pooler_config,
             logits_processor_pattern=self.logits_processor_pattern,
@@ -1122,7 +1114,13 @@ class EngineArgs:
                 "DualChunkFlashAttention is not supported on V1 engine. "
                 "To run the model in V0 engine, try set 'VLLM_USE_V1=0'")
 
-        # Step5 创建 KV CacheConfig
+        sliding_window: Optional[int] = None
+        if not is_interleaved(model_config.hf_text_config):
+            # Only set CacheConfig.sliding_window if the model is all sliding
+            # window. Otherwise CacheConfig.sliding_window will override the
+            # global layers in interleaved sliding window models.
+            sliding_window = model_config.get_sliding_window()
+
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
@@ -1130,7 +1128,7 @@ class EngineArgs:
             cache_dtype=self.kv_cache_dtype,
             is_attention_free=model_config.is_attention_free,
             num_gpu_blocks_override=self.num_gpu_blocks_override,
-            sliding_window=model_config.get_sliding_window(),
+            sliding_window=sliding_window,
             enable_prefix_caching=self.enable_prefix_caching,
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
             cpu_offload_gb=self.cpu_offload_gb,
@@ -1875,13 +1873,3 @@ def human_readable_int(value):
 
     # Regular plain number.
     return int(value)
-
-
-# These functions are used by sphinx to build the documentation
-def _engine_args_parser():
-    return EngineArgs.add_cli_args(FlexibleArgumentParser())
-
-
-def _async_engine_args_parser():
-    return AsyncEngineArgs.add_cli_args(FlexibleArgumentParser(),
-                                        async_args_only=True)
