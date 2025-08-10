@@ -21,6 +21,12 @@ class SpecDecodingStats:
     aggregated across requests by the scheduler and returned to the
     frontend in EngineCoreOutputs->SchedulerStats.
     """
+    """
+    来自调度器的每步迭代解码统计信息。
+    
+    每个调度器步骤中，推测解码性能的统计数据会在请求间进行聚合，
+    并通过 EngineCoreOutputs->SchedulerStats 返回给前端。
+    """
 
     num_spec_tokens: int
     num_drafts: int = 0

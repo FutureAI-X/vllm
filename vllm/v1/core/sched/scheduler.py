@@ -864,6 +864,7 @@ class Scheduler(SchedulerInterface):
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
+        # Step1 参数定义
         sampled_token_ids = model_runner_output.sampled_token_ids
         spec_token_ids = model_runner_output.spec_token_ids
         logprobs = model_runner_output.logprobs
@@ -875,12 +876,14 @@ class Scheduler(SchedulerInterface):
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: Optional[SpecDecodingStats] = None
 
+        # Step2 循环处理每一个请求
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
         # to avoid expensive operations inside the loop.
         stopped_running_reqs: set[Request] = set()
         stopped_preempted_reqs: set[Request] = set()
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
+            # 1. 获取请求相关信息
             assert num_tokens_scheduled > 0
             request = self.requests.get(req_id)
             if request is None:
@@ -893,6 +896,7 @@ class Scheduler(SchedulerInterface):
             generated_token_ids = sampled_token_ids[
                 req_index] if sampled_token_ids else []
 
+            # 2. 投机解码相关处理
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id))
             if scheduled_spec_token_ids:
@@ -954,6 +958,7 @@ class Scheduler(SchedulerInterface):
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
 
+            # 更新请求中的 draft tokens
             # Add newly generated spec token ids to the request.
             if spec_token_ids is not None:
                 if self.structured_output_manager.should_advance(request):
@@ -964,6 +969,7 @@ class Scheduler(SchedulerInterface):
                 else:
                     request.spec_token_ids = spec_token_ids[req_index]
 
+            # 获取 prompt logprobs
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             if new_token_ids or pooler_output is not None \
@@ -988,6 +994,7 @@ class Scheduler(SchedulerInterface):
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
 
+        # Step4 已终止的请求处理
         # Remove the stopped requests from the running and waiting queues.
         if stopped_running_reqs:
             self.running = [
@@ -997,11 +1004,13 @@ class Scheduler(SchedulerInterface):
             # This is a rare case and unlikely to impact performance.
             self.waiting.remove_requests(stopped_preempted_reqs)
 
+        # Step5 分布式 KV Cache 处理
         # KV Connector: update state for finished KV Transfers.
         if model_runner_output.kv_connector_output:
             self._update_from_kv_xfer_finished(
                 model_runner_output.kv_connector_output)
 
+        # Step6 组装最终输出
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
         engine_core_outputs = {
