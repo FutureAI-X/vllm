@@ -27,7 +27,7 @@ class SamplingMetadata:
     generators: dict[int, torch.Generator]
 
     # None means no logprobs, 0 means sampled token logprobs only
-    # 需要返回的 logprobs 的数量: None 表示不需要 logprobs，0 表示只返回采样的 token 的 logprobs
+    # 需要返回的 logprobs 的数量: None 表示不需要 logprobs，0 表示只返回采样的 token 的 logprobs，不为0则返回top-k个token的概率
     max_num_logprobs: Optional[int]
 
     # 惩罚机制

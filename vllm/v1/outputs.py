@@ -9,10 +9,25 @@ import torch
 
 class LogprobsLists(NamedTuple):
 
+    """
+    二维列表，
+    - 第1维: 请求
+    - 第2维： 概率最高的n个token Id
+    """
     # [num_reqs, max_num_logprobs + 1]
     logprob_token_ids: list[list[int]]
+
+    """
+    二维列表
+    - 第1维: 请求
+    - 第2维: 概率最高的n个 token Id 对应的概率值
+    """
     # [num_reqs, max_num_logprobs + 1]
     logprobs: list[list[float]]
+
+    """
+    存储每个请求的采样 token 的 rank
+    """
     # [num_reqs]
     sampled_token_ranks: list[int]
 
@@ -142,20 +157,34 @@ class KVConnectorOutput:
 @dataclass
 class ModelRunnerOutput:
 
+    """request_id 列表，长度为请求个数"""
     # [num_reqs]
     req_ids: list[str]
+
+    """request_id 与 index 映射，其中 index 指该请求在结果中的索引未至"""
     # req_id -> index
     req_id_to_index: dict[str, int]
 
+    """
+    二维列表，存储每个 request 生成的 tokens
+    - 第1维: 请求维度
+    - 第2维: 每个请求生成的 tokens
+    """
     # num_reqs x num_generated_tokens
     # num_generated_tokens is the number of tokens
     # generated in the current step. It can be different for
     # each request due to speculative/jump decoding.
     sampled_token_ids: list[list[int]]
 
+    """
+    二维列表，存储每个 request 生成的 draft token
+    - 第1维: 请求维度
+    - 第2维: 投机解码生成的 draft token
+    """
     # num_reqs x num_spec_tokens
     spec_token_ids: Optional[list[list[int]]]
 
+    """存储最后一个 sampled token 相关的对数概率信息"""
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs]
@@ -167,11 +196,14 @@ class ModelRunnerOutput:
     # [prompt_len]
     prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]]
 
+    """每个请求的池化输出张量"""
     # [num_reqs, hidden_size]
     pooler_output: list[Optional[torch.Tensor]]
 
+    """KV Cache Connector 的输出信息"""
     kv_connector_output: Optional[KVConnectorOutput] = None
 
+    """记录每个请求在 logits 中 NaN 值的数量"""
     # req_id -> num_nans_in_logits
     num_nans_in_logits: Optional[dict[str, int]] = None
 

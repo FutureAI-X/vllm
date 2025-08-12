@@ -885,6 +885,7 @@ class Scheduler(SchedulerInterface):
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             # 1. 获取请求相关信息
             assert num_tokens_scheduled > 0
+            # (1) 获取 scheduler 中维护的 request
             request = self.requests.get(req_id)
             if request is None:
                 # The request is already finished. This can happen if the
@@ -893,6 +894,7 @@ class Scheduler(SchedulerInterface):
                 continue
 
             req_index = model_runner_output.req_id_to_index[req_id]
+            # (2) 获取 request 生成的新 token
             generated_token_ids = sampled_token_ids[
                 req_index] if sampled_token_ids else []
 
@@ -920,11 +922,13 @@ class Scheduler(SchedulerInterface):
             kv_transfer_params = None
             status_before_stop = request.status
 
+            # 3. 更新 request 并判断是否需要停止请求 (内部是逐个 token 处理的，并可能对 new_token_ids 进行截取)
             # Check for stop and update request status.
             if new_token_ids:
                 new_token_ids, stopped = self._update_request_with_output(
                     request, new_token_ids)
 
+            # 4. 池化模型 stop 停止检查
             # Stop checking for pooler models.
             pooler_output = None
             if pooler_outputs:
@@ -932,6 +936,7 @@ class Scheduler(SchedulerInterface):
                 stopped = check_stop(request, self.max_model_len,
                                      pooler_output)
 
+            # 5. 如果 request 停止，则 free
             if stopped:
                 kv_transfer_params = self._free_request(request)
                 if status_before_stop == RequestStatus.RUNNING:
@@ -939,6 +944,7 @@ class Scheduler(SchedulerInterface):
                 else:
                     stopped_preempted_reqs.add(request)
 
+            # 6. 获取 logprobs
             # Extract sample logprobs if needed.
             if request.sampling_params is not None \
                 and request.sampling_params.logprobs is not None and logprobs:
@@ -946,6 +952,7 @@ class Scheduler(SchedulerInterface):
                 # the outer lists can be of length > 1.
                 new_logprobs = logprobs.slice(req_index, req_index + 1)
 
+            # 7. 格式化输出相关
             if new_token_ids and self.structured_output_manager.should_advance(
                     request):
                 # NOTE: structured_output_request
@@ -954,11 +961,12 @@ class Scheduler(SchedulerInterface):
                 request.structured_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
                     req_id, new_token_ids)
 
+            # 8. NaN值获取
             # spec_token_ids comes from the model runner output
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
 
-            # 更新请求中的 draft tokens
+            # 9. 将新生成的 draft token 添加到 request 中
             # Add newly generated spec token ids to the request.
             if spec_token_ids is not None:
                 if self.structured_output_manager.should_advance(request):
@@ -1043,6 +1051,7 @@ class Scheduler(SchedulerInterface):
         request: Request,
         new_token_ids: list[int],
     ) -> tuple[list[int], bool]:
+        """根据生成的 token 更新 request"""
         # Append generated tokens and check for stop. Note that if
         # a request is still being prefilled, we expect the model runner
         # to return empty token ids for the request.
@@ -1132,15 +1141,18 @@ class Scheduler(SchedulerInterface):
             self._free_request(request)
 
     def _free_request(self, request: Request) -> Optional[dict[str, Any]]:
+        """释放请求"""
         assert request.is_finished()
-
+        # 1. 分布式释放
         delay_free_blocks, kv_xfer_params = self._connector_finished(request)
+        # 2. encoder 相关处理
         self.encoder_cache_manager.free(request)
+        # 3. 将 request_id 加入 finished_req_ids
         request_id = request.request_id
         self.finished_req_ids.add(request_id)
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
-
+        # 4. 释放 blocks
         if not delay_free_blocks:
             self._free_blocks(request)
 
