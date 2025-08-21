@@ -1,16 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections import defaultdict
 from dataclasses import dataclass
-from typing import Optional
+from typing import Literal, Optional, overload
 
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
-from vllm.utils import sha256, sha256_cbor_64bit
 from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
-from vllm.v1.core.kv_cache_utils import (BlockHash, KVCacheBlock,
-                                         hash_request_tokens, init_none_hash)
+from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
@@ -66,7 +63,24 @@ class KVCacheBlocks:
             tuple(blk1 + blk2
                   for blk1, blk2 in zip(self.blocks, other.blocks)))
 
-    def get_block_ids(self) -> tuple[list[int], ...]:
+    @overload
+    def get_block_ids(
+        self,
+        allow_none: Literal[False] = False,
+    ) -> tuple[list[int], ...]:
+        ...
+
+    @overload
+    def get_block_ids(
+        self,
+        allow_none: Literal[True] = True,
+    ) -> Optional[tuple[list[int], ...]]:
+        ...
+
+    def get_block_ids(
+        self,
+        allow_none: bool = False,
+    ):
         """
         Converts the KVCacheBlocks instance to block_ids.
         
@@ -75,10 +89,8 @@ class KVCacheBlocks:
             * the outer tuple corresponds to KV cache groups
             * each inner list contains the block_ids of the blocks in that group
         """
-        """
-        它遍历每个KV缓存组中的所有块，并提取每个块的 block_id。
-        返回值是一个嵌套结构：外层元组对应不同的KV缓存组，内层列表包含该组中所有块的ID
-        """
+        if allow_none and all(len(group) == 0 for group in self.blocks):
+            return None
         return tuple([blk.block_id for blk in group] for group in self.blocks)
 
     def get_unhashed_block_ids(self) -> list[int]:
@@ -103,7 +115,6 @@ class KVCacheManager:
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
         enable_caching: bool = True,
-        caching_hash_algo: str = "builtin",
         use_eagle: bool = False,
         log_stats: bool = False,
         enable_kv_cache_events: bool = False,
@@ -111,20 +122,7 @@ class KVCacheManager:
         # 模型最大长度
         self.max_model_len = max_model_len
 
-        # 没有 Attention 的 Model 无需 KV cache，因此也没有 prefix cache
-        if len(kv_cache_config.kv_cache_groups) == 0:
-            # Attention free models don't have kv cache,
-            # thus don't need prefix caching.
-            enable_caching = False
         self.enable_caching = enable_caching
-
-        # kv cache hash 函数
-        self.caching_hash_fn = (
-            sha256_cbor_64bit if caching_hash_algo == "sha256_cbor_64bit" else
-            sha256 if caching_hash_algo == "sha256" else hash)
-        init_none_hash(self.caching_hash_fn)
-
-        # 是否使用 eagle
         self.use_eagle = use_eagle
         self.log_stats = log_stats
 
@@ -149,7 +147,6 @@ class KVCacheManager:
             max_model_len=self.max_model_len,
             use_eagle=self.use_eagle,
             enable_caching=self.enable_caching,
-            caching_hash_fn=self.caching_hash_fn,
             enable_kv_cache_events=enable_kv_cache_events,
         )
 
@@ -159,17 +156,6 @@ class KVCacheManager:
         # block pool
         self.block_pool = self.coordinator.block_pool
         self.kv_cache_config = kv_cache_config
-
-        # Mapping from request ID to kv block hashes.
-        # This is to avoid recomputing the block hashes for each call of
-        # `get_computed_blocks` or `allocate_slots`.
-        """
-        一个 dict/map, 维护了每个 request_id 到 多个 KV Block Hash 的映射
-        dict[request_id -> list[BlockHash]]
-        此属性存在的目的是为了避免在调用 get_computed_blocks 与 allocate_slots 时重新计算 block hashes
-        """
-        self.req_to_block_hashes: defaultdict[
-            str, list[BlockHash]] = defaultdict(list)
 
     @property
     def usage(self) -> float:
@@ -228,30 +214,6 @@ class KVCacheManager:
                     and request.sampling_params.prompt_logprobs is not None)):
             return self.create_empty_block_list(), 0
 
-        # Step2 获取 request 的 Block 的 Hash
-        # 1. 根据 request_id 获取已缓存的 Block Hash: 如果此 request 之前尝试过调度，则从 req_to_block_hashes 中获取
-        # The block hashes for the request may already be computed
-        # if the scheduler has tried to schedule the request before.
-        block_hashes = self.req_to_block_hashes[request.request_id]
-
-        # 2. 如果根据 request id 没有找到，则使用 hash_request_tokens 函数计算哈希值并存储到 req_to_block_hashes 中
-        if not block_hashes:
-            # 判断 block_size
-            assert self.block_size is not None
-            # 计算 block hash
-            block_hashes = hash_request_tokens(self.caching_hash_fn,
-                                               self.block_size, request)
-            # 更新到 req_to_block_hashes
-            self.req_to_block_hashes[request.request_id] = block_hashes
-
-        # Step3 获取已缓存的块
-        """
-        注意:
-        - 当所有令牌都命中缓存时，我们必须重新计算最后一个令牌以获得logits
-        - 因此，将max_cache_hit_length设置为prompt_length - 1
-        - 这可能会触发整个块的重新计算，而不仅仅是单个最后一个令牌, 因为allocate_slots()要求num_computed_tokens与块大小对齐
-        - 移除这个限制可能会在未来略微提升性能 假
-        """
         # NOTE: When all tokens hit the cache, we must recompute the last token
         # to obtain logits. Thus, set max_cache_hit_length to prompt_length - 1.
         # This can trigger recomputation of an entire block, rather than just
@@ -262,7 +224,7 @@ class KVCacheManager:
         max_cache_hit_length = request.num_tokens - 1
         # 2. 调用协调器的 find_longest_cache_hit 方法查找最长的缓存命中 (返回已计算的块和已计算的令牌数)
         computed_blocks, num_new_computed_tokens = (
-            self.coordinator.find_longest_cache_hit(block_hashes,
+            self.coordinator.find_longest_cache_hit(request.block_hashes,
                                                     max_cache_hit_length))
 
         # Step4 如果启用了统计日志，则更新前缀缓存统计信息
@@ -398,11 +360,7 @@ class KVCacheManager:
         # at `request.num_tokens`, ensuring only "finalized" tokens are cached.
         num_tokens_to_cache = min(num_computed_tokens + num_new_tokens,
                                   request.num_tokens)
-        self.coordinator.cache_blocks(
-            request,
-            self.req_to_block_hashes[request.request_id],
-            num_tokens_to_cache,
-        )
+        self.coordinator.cache_blocks(request, num_tokens_to_cache)
 
         return KVCacheBlocks(new_blocks)
 
@@ -475,14 +433,6 @@ class KVCacheManager:
         return self.coordinator.get_num_common_prefix_blocks(
             request.request_id, num_running_requests)
 
-    def free_block_hashes(self, request: Request) -> None:
-        """Discard the block hashes for the request.
-
-        NOTE: Unlike `free`, this method should be called only when the request
-        is finished, not when it is preempted.
-        """
-        self.req_to_block_hashes.pop(request.request_id, None)
-
     def take_events(self) -> list[KVCacheEvent]:
         """Take the KV cache events from the block pool.
 
@@ -491,17 +441,18 @@ class KVCacheManager:
         """
         return self.block_pool.take_events()
 
+    def get_blocks(self, request_id: str) -> KVCacheBlocks:
+        """Get the blocks of a request."""
+        return KVCacheBlocks(self.coordinator.get_blocks(request_id))
+
     def get_block_ids(self, request_id: str) -> tuple[list[int], ...]:
         """Get the block ids of a request."""
-        return KVCacheBlocks(
-            self.coordinator.get_blocks(request_id)).get_block_ids()
+        return self.get_blocks(request_id).get_block_ids()
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         """Cache the blocks for the request, if enabled."""
         if self.enable_caching:
-            block_hashes = self.req_to_block_hashes[request.request_id]
-            self.coordinator.cache_blocks(request, block_hashes,
-                                          num_computed_tokens)
+            self.coordinator.cache_blocks(request, num_computed_tokens)
 
     def create_empty_block_list(self) -> KVCacheBlocks:
         """Creates a new KVCacheBlocks instance with no blocks."""
