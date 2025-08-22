@@ -84,35 +84,53 @@ class TreeAttentionBackend(AttentionBackend):
 
 @dataclass
 class TreeAttentionMetadata:
+    """类是 vLLM 中 TreeAttention 后端的元数据结构，用于存储和管理注意力计算所需的各种信息。"""
+    # 实际token数量（不包括padding）
     num_actual_tokens: int  # Number of tokens excluding padding.
+    # 最大查询长度
     max_query_len: int
+    # 查询的起始位置（累积和）
     query_start_loc: torch.Tensor
+    # 最大序列长度
     max_seq_len: int
+    # 每个序列的长度
     seq_lens: torch.Tensor
+    # 块表映射
     block_table: torch.Tensor
+    # slot映射
     slot_mapping: torch.Tensor
 
+    # 预填充阶段的token数
     num_prefill_tokens: int = 0
+    # 解码阶段的token数
     num_decode_tokens: int = 0
+    # 填充请求数
     num_prefills: int = 0
+    # 解码请求数
     num_decodes: int = 0
 
+    # 树注意力偏置矩阵，用于speculative decoding中的树注意力机制
     tree_attn_bias: Optional[torch.Tensor] = None
 
+    # 缓存的元数据，用于避免重复计算
     # Cached Prefill/decode metadata.
     _cached_prefill_metadata: Optional["TreeAttentionMetadata"] = None
     _cached_decode_metadata: Optional["TreeAttentionMetadata"] = None
 
     @property
     def prefill_metadata(self) -> Optional["TreeAttentionMetadata"]:
+        """构造预填充阶段的元数据"""
+        # 1. 如果没有预填充请求，返回None
         if self.num_prefills == 0:
             return None
 
+        # 2. 如果已有缓存，直接返回缓存
         if self._cached_prefill_metadata is not None:
             # Recover cached prefill-phase attention
             # metadata structure
             return self._cached_prefill_metadata
 
+        # 3. 否则从原始数据中提取预填充部分并创建新的元数据对象
         q_start_loc = self.query_start_loc[self.num_decodes:]
         q_seqlens = torch.diff(q_start_loc)
         kv_seqlens = self.seq_lens[self.num_decodes:]

@@ -52,47 +52,70 @@ class EagleProposer:
         device: torch.device,
         runner=None,
     ):
+        # 基础配置属性
         self.vllm_config = vllm_config
+        # 投机解码配置
         self.speculative_config = vllm_config.speculative_config
+        # 草稿模型配置
         self.draft_model_config = self.speculative_config.draft_model_config
+        # 投机解码方法（用于区分 eagle、eagle3 ?）
         self.method = self.speculative_config.method
 
+        # 模型相关配置
+        # ModelRunner 引用
         self.runner = runner
+        # 模型数据类型
         self.dtype = vllm_config.model_config.dtype
+        # 模型支持的最大序列长度
         self.max_model_len = vllm_config.model_config.max_model_len
+        # 每个 block 的 token 数
         self.block_size = vllm_config.cache_config.block_size
+        # 要投机的 draft token 数
         self.num_speculative_tokens = (
             self.speculative_config.num_speculative_tokens)
+        # 调度器每次调度的最大 token 数
         self.max_num_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens)
+        # 用于token索引计算的numpy数组
         self.token_arange_np = np.arange(self.max_num_tokens)
+
+        # 草稿模型的隐藏层大小（可能与目标模型不同）
         # We need to get the hidden size from the draft model config because
         # the draft model's hidden size can be different from the target model's
         # hidden size (e.g., Llama 3.3 70B).
         self.hidden_size = self.draft_model_config.get_hidden_size()
 
+        # 是否是多模态模型的标志
         self.is_multimodal_model = vllm_config.model_config \
             .is_multimodal_model
 
+        # CUDA 图优化相关
+        # 是否启用CUDA图优化
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE and
                                not self.vllm_config.model_config.enforce_eager)
+        # CUDA图捕获的不同批处理大小
         self.cudagraph_batch_sizes = list(
             reversed(
                 self.vllm_config.compilation_config.cudagraph_capture_sizes))
 
+        # 缓冲区：用于 CUDA GRAPH
         # persistent buffers for cuda graph
+        # 输入token ID缓冲区
         self.input_ids = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int32,
                                      device=device)
+        # 位置ID缓冲区
         self.positions = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int64,
                                      device=device)
+        # 隐藏状态缓冲区
         self.hidden_states = torch.zeros(
             (self.max_num_tokens, self.hidden_size),
             dtype=self.dtype,
             device=device)
 
+        # 用于计算query_start_loc的范围张量
         max_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.arange = torch.arange(
             # We need +1 here because the arange is used to set query_start_loc,
@@ -102,13 +125,16 @@ class EagleProposer:
             dtype=torch.int32,
         )
 
+        # 输入嵌入缓冲区
         self.inputs_embeds = torch.zeros(
             (self.max_num_tokens, self.hidden_size),
             dtype=self.dtype,
             device=device)
 
+        # 允许的 AttentionMetadata
         # Determine allowed attention backends once during initialization.
         self.allowed_attn_types: tuple[type[EagleAttentionMetadata], ...]
+        # ROCm 平台
         if current_platform.is_rocm():
             rocm_types = [TritonAttentionMetadata, FlashAttentionMetadata]
             # vllm.v1.attention.backends.rocm_aiter_fa is an optional backend
@@ -121,6 +147,7 @@ class EagleProposer:
             self.allowed_attn_types = (FlashAttentionMetadata,
                                        TreeAttentionMetadata)
 
+        # Tree Speculative token 相关
         # Parse the speculative token tree.
         spec_token_tree = self.speculative_config.speculative_token_tree
         self.tree_choices: list[tuple[int,
